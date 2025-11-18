@@ -46,6 +46,7 @@ Qwen
 chatgpt
 openai
 sora
+LLM
 
 claude
 Anthropic
@@ -54,6 +55,8 @@ iphone
 ipad
 mac
 ios
+macos
+苹果
 
 ai
 !gai
@@ -63,8 +66,10 @@ ai
 雷军
 小米手机
 自动驾驶
-
+电池
+半导体
 机器人
+国产替代
 
 国产
 中国
@@ -90,3 +95,8 @@ ai
 csgo赛事
 鬼灭之刃
 电影票房
+电影
+美剧
+娱乐
+明星
+
