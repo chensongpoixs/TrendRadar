@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"strings"
 	"sync"
@@ -179,21 +180,39 @@ func runCrawlAnalyzeAndNotify() error {
 		filterMode = fmt.Sprintf("AI 关注标题过滤: 已启用（兴趣词：%s）", strings.TrimSpace(cfg.Filter.Interests))
 	}
 
-	totalCount := 0
+	afterAICount := 0
 	for _, items := range results {
-		totalCount += len(items)
+		afterAICount += len(items)
 	}
-	report := fmt.Sprintf(
-		"趋势雷达 | 每小时热点情报简报\n\n一、执行摘要\n- 抓取时间：%s\n- 覆盖平台：%d\n- 关注新闻：%d\n- RSS 条目：%d\n- 抓取失败：%v\n- 过滤策略：%s\n\n二、平台覆盖\n%s\n\n三、重点新闻明细\n%s",
+
+	emailResults, emailSkipped, dedupErr := storage.FilterNotYetEmailed(results)
+	if dedupErr != nil {
+		log.Printf("Email dedup query failed, sending without filter: %v", dedupErr)
+		emailResults, emailSkipped = results, 0
+	}
+	mailCount := 0
+	for _, items := range emailResults {
+		mailCount += len(items)
+	}
+	dedupLine := ""
+	if emailSkipped > 0 {
+		dedupLine = fmt.Sprintf("\n邮件去重: 已排除历史已发送 %d 条", emailSkipped)
+	}
+
+	plainReport := fmt.Sprintf(
+		"【趋势雷达】移动端行业快报\n\n[执行摘要]\n时间: %s\n平台: %d\n关注新闻(过滤后): %d\n本邮件新推送: %d%s\nRSS: %d\n失败平台: %v\n策略: %s\n\n[平台覆盖]\n%s\n\n[重点新闻TOP]\n%s",
 		time.Now().Format(time.RFC3339),
 		len(results),
-		totalCount,
+		afterAICount,
+		mailCount,
+		dedupLine,
 		rssTotal,
 		failedIDs,
 		filterMode,
-		formatPlatformCoverage(results, idToName),
-		formatNewsDetails(results, idToName, crawlTime),
+		formatPlatformCoverage(emailResults, idToName),
+		formatMobileNewsBrief(emailResults, idToName, crawlTime),
 	)
+	report := formatEmailHTML(emailResults, idToName, crawlTime, mailCount, rssTotal, failedIDs, filterMode, emailSkipped)
 
 	if !cfg.Notification.Enabled {
 		log.Printf("Notification disabled, skip sending email. Local data saved successfully.")
@@ -203,12 +222,23 @@ func runCrawlAnalyzeAndNotify() error {
 		log.Printf("Email recipient is empty, skip sending email. Local data saved successfully.")
 		return nil
 	}
+	if mailCount == 0 {
+		log.Printf("Email skipped: no new items after dedup (after AI: %d, excluded as already emailed: %d)", afterAICount, emailSkipped)
+		return nil
+	}
 	dispatcher := notification.NewDispatcher()
 	sendResult := dispatcher.Send("趋势雷达 每小时关注标题汇总", report)
 	if ok, exists := sendResult["email"]; !exists || !ok {
+		log.Printf("Email html send failed, fallback to plain report")
+		sendResult = dispatcher.Send("趋势雷达 每小时关注标题汇总", plainReport)
+	}
+	if ok, exists := sendResult["email"]; !exists || !ok {
 		return fmt.Errorf("email send failed: %v", sendResult)
 	}
-	log.Printf("Scheduled email sent successfully to %s", cfg.Notification.Channels.Email.To)
+	if err := storage.RecordEmailSent(emailResults); err != nil {
+		log.Printf("Record email fingerprints failed: %v", err)
+	}
+	log.Printf("Scheduled email sent successfully to %s (new: %d, dedup excluded: %d)", cfg.Notification.Channels.Email.To, mailCount, emailSkipped)
 	return nil
 }
 
@@ -324,4 +354,105 @@ func formatPlatformCoverage(results map[string][]model.NewsItem, idToName map[st
 		b.WriteString(fmt.Sprintf("- %s：%d 条\n", platformName, len(items)))
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func formatMobileNewsBrief(results map[string][]model.NewsItem, idToName map[string]string, fallbackTime time.Time) string {
+	if len(results) == 0 {
+		return "无重点新闻"
+	}
+
+	const maxPerPlatform = 5
+	var b strings.Builder
+	for platformID, items := range results {
+		if len(items) == 0 {
+			continue
+		}
+		platformName := idToName[platformID]
+		if strings.TrimSpace(platformName) == "" {
+			platformName = platformID
+		}
+		b.WriteString(fmt.Sprintf("\n%s\n", platformName))
+
+		limit := len(items)
+		if limit > maxPerPlatform {
+			limit = maxPerPlatform
+		}
+		for i := 0; i < limit; i++ {
+			item := items[i]
+			title := strings.TrimSpace(item.Title)
+			if len([]rune(title)) > 46 {
+				runes := []rune(title)
+				title = string(runes[:46]) + "..."
+			}
+			link := strings.TrimSpace(item.URL)
+			if link == "" {
+				link = strings.TrimSpace(item.MobileURL)
+			}
+			if link == "" {
+				link = "无链接"
+			}
+
+			itemTime := item.CrawlTime
+			if itemTime.IsZero() {
+				itemTime = fallbackTime
+			}
+			b.WriteString(fmt.Sprintf("%d) %s\n", i+1, title))
+			b.WriteString(fmt.Sprintf("   %s | %s\n", itemTime.Format("15:04"), link))
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func formatEmailHTML(results map[string][]model.NewsItem, idToName map[string]string, fallbackTime time.Time, totalCount, rssTotal int, failedIDs []string, filterMode string, dedupSkipped int) string {
+	var b strings.Builder
+	b.WriteString(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">`)
+	b.WriteString(`<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fb;margin:0;padding:12px;color:#111827}.wrap{max-width:760px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb}.hero{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:20px}.title{font-size:24px;font-weight:700}.meta{display:flex;gap:24px;flex-wrap:wrap;margin-top:14px;font-size:13px}.section{padding:14px 16px;border-top:1px solid #eef2f7}.h{font-size:15px;font-weight:700;margin:0 0 10px}.platform{margin:10px 0 4px;font-weight:700;color:#374151}.item{padding:10px 0;border-top:1px dashed #e5e7eb}.item:first-child{border-top:none}.t{font-size:14px;line-height:1.5}.m{font-size:12px;color:#6b7280;margin-top:4px}.a{color:#2563eb;text-decoration:none;word-break:break-all}.foot{padding:14px 16px;color:#6b7280;font-size:12px;text-align:center}</style></head><body><div class="wrap">`)
+	b.WriteString(`<div class="hero"><div class="title">热点新闻分析</div>`)
+	b.WriteString(`<div class="meta">`)
+	b.WriteString(fmt.Sprintf(`<div><div>本批新内容</div><strong>%d 条</strong></div>`, totalCount))
+	b.WriteString(fmt.Sprintf(`<div><div>RSS</div><strong>%d 条</strong></div>`, rssTotal))
+	b.WriteString(fmt.Sprintf(`<div><div>生成时间</div><strong>%s</strong></div>`, html.EscapeString(time.Now().Format("01-02 15:04"))))
+	b.WriteString(`</div></div>`)
+	b.WriteString(`<div class="section"><p style="margin:0;font-size:13px;color:#374151">过滤策略：` + html.EscapeString(filterMode) + `</p>`)
+	if dedupSkipped > 0 {
+		b.WriteString(`<p style="margin:6px 0 0;font-size:12px;color:#1d4ed8">本小时已去重，未重复发送历史已推送 ` + fmt.Sprintf("%d", dedupSkipped) + ` 条</p>`)
+	}
+	if len(failedIDs) > 0 {
+		b.WriteString(`<p style="margin:6px 0 0;font-size:12px;color:#b91c1c">失败平台：` + html.EscapeString(strings.Join(failedIDs, ",")) + `</p>`)
+	}
+	b.WriteString(`</div><div class="section"><h3 class="h">重点新闻</h3>`)
+
+	const maxPerPlatform = 8
+	for platformID, items := range results {
+		if len(items) == 0 {
+			continue
+		}
+		name := idToName[platformID]
+		if strings.TrimSpace(name) == "" {
+			name = platformID
+		}
+		b.WriteString(`<div class="platform">` + html.EscapeString(name) + `（` + fmt.Sprintf("%d", len(items)) + `条）</div>`)
+		limit := len(items)
+		if limit > maxPerPlatform {
+			limit = maxPerPlatform
+		}
+		for i := 0; i < limit; i++ {
+			item := items[i]
+			link := strings.TrimSpace(item.URL)
+			if link == "" {
+				link = strings.TrimSpace(item.MobileURL)
+			}
+			if link == "" {
+				link = "#"
+			}
+			itemTime := item.CrawlTime
+			if itemTime.IsZero() {
+				itemTime = fallbackTime
+			}
+			b.WriteString(`<div class="item"><div class="t">` + fmt.Sprintf("%d. ", i+1) + html.EscapeString(strings.TrimSpace(item.Title)) + `</div>`)
+			b.WriteString(`<div class="m">` + html.EscapeString(itemTime.Format("15:04")) + ` · <a class="a" href="` + html.EscapeString(link) + `" target="_blank">查看原文</a></div></div>`)
+		}
+	}
+	b.WriteString(`</div><div class="foot">由 趋势雷达 生成 · GitHub 开源项目</div></div></body></html>`)
+	return b.String()
 }

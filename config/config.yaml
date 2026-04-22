@@ -22,41 +22,38 @@ database:
 platforms:
   enabled: true
   sources:
-    - id: "weibo"
-      name: "微博"
-      enabled: true
-    - id: "zhihu"
-      name: "知乎"
+    - id: "toutiao"
+      name: "今日头条"
       enabled: true
     - id: "baidu"
       name: "百度热搜"
       enabled: true
-    - id: "toutiao"
-      name: "今日头条"
-      enabled: true
-    - id: "bilibili"
-      name: "哔哩哔哩"
-      enabled: true
-    - id: "wallstreetcn"
+    - id: "wallstreetcn-hot"
       name: "华尔街见闻"
       enabled: true
-    - id: "cls"
-      name: "财联社"
+    - id: "thepaper"
+      name: "澎湃新闻"
       enabled: true
-    - id: "36kr"
-      name: "36氪"
+    - id: "bilibili-hot-search"
+      name: "bilibili 热搜"
       enabled: true
-    - id: "huxiu"
-      name: "虎嗅"
+    - id: "cls-hot"
+      name: "财联社热门"
       enabled: true
-    - id: "ithome"
-      name: "IT之家"
+    - id: "ifeng"
+      name: "凤凰网"
       enabled: true
-    - id: "juejin"
-      name: "掘金"
+    - id: "tieba"
+      name: "贴吧"
       enabled: true
-    - id: "sspai"
-      name: "少数派"
+    - id: "weibo"
+      name: "微博"
+      enabled: true
+    - id: "douyin"
+      name: "抖音"
+      enabled: true
+    - id: "zhihu"
+      name: "知乎"
       enabled: true
 
 rss:

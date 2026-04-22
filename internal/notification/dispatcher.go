@@ -296,12 +296,17 @@ func (d *Dispatcher) sendToEmail(title, message string) bool {
 	}
 
 	// RFC822 格式邮件正文
+	isHTML := strings.Contains(strings.ToLower(message), "<html")
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "From: 趋势雷达 <%s>\r\n", from)
 	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(recipients, ","))
 	fmt.Fprintf(&buf, "Subject: %s\r\n", title)
 	fmt.Fprint(&buf, "MIME-Version: 1.0\r\n")
-	fmt.Fprint(&buf, "Content-Type: text/plain; charset=UTF-8\r\n")
+	if isHTML {
+		fmt.Fprint(&buf, "Content-Type: text/html; charset=UTF-8\r\n")
+	} else {
+		fmt.Fprint(&buf, "Content-Type: text/plain; charset=UTF-8\r\n")
+	}
 	fmt.Fprint(&buf, "\r\n")
 	fmt.Fprint(&buf, message)
 

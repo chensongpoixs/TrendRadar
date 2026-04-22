@@ -75,6 +75,7 @@ func migrateDatabase() error {
 		&model.RSSFeed{},
 		&model.CrawlRecord{},
 		&model.RankHistory{},
+		&model.EmailSentFingerprint{},
 	)
 }
 
