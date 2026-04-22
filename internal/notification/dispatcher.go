@@ -2,10 +2,12 @@ package notification
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"strings"
@@ -295,7 +297,7 @@ func (d *Dispatcher) sendToEmail(title, message string) bool {
 
 	// RFC822 格式邮件正文
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "From: TrendRadar <%s>\r\n", from)
+	fmt.Fprintf(&buf, "From: 趋势雷达 <%s>\r\n", from)
 	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(recipients, ","))
 	fmt.Fprintf(&buf, "Subject: %s\r\n", title)
 	fmt.Fprint(&buf, "MIME-Version: 1.0\r\n")
@@ -303,13 +305,108 @@ func (d *Dispatcher) sendToEmail(title, message string) bool {
 	fmt.Fprint(&buf, "\r\n")
 	fmt.Fprint(&buf, message)
 
-	// 发送邮件
+	// 发送邮件：优先按端口自动选择协议，兼容 163/QQ 等常见邮箱
 	auth := smtp.PlainAuth("", from, cfg.Password, smtpServer)
-	if err := smtp.SendMail(smtpServer+":"+smtpPort, auth, from, recipients, buf.Bytes()); err != nil {
-		log.Printf("Failed to send email: %v", err)
+	var sendErr error
+	if smtpPort == "465" {
+		sendErr = sendMailImplicitTLS(smtpServer, smtpPort, from, recipients, auth, buf.Bytes())
+	} else {
+		sendErr = sendMailStartTLS(smtpServer, smtpPort, from, recipients, auth, buf.Bytes())
+	}
+	if sendErr != nil {
+		log.Printf("Failed to send email: %v", sendErr)
 		return false
 	}
 
 	log.Printf("Email sent successfully to %s", toEmail)
 	return true
+}
+
+func sendMailStartTLS(host, port, from string, to []string, auth smtp.Auth, msg []byte) error {
+	addr := net.JoinHostPort(host, port)
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		tlsConfig := &tls.Config{
+			ServerName: host,
+			MinVersion: tls.VersionTLS12,
+		}
+		if err := c.StartTLS(tlsConfig); err != nil {
+			return err
+		}
+	}
+
+	if ok, _ := c.Extension("AUTH"); ok {
+		if err := c.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return err
+	}
+	for _, addrTo := range to {
+		if err := c.Rcpt(addrTo); err != nil {
+			return err
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(msg); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
+}
+
+func sendMailImplicitTLS(host, port, from string, to []string, auth smtp.Auth, msg []byte) error {
+	addr := net.JoinHostPort(host, port)
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		ServerName: host,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	if ok, _ := c.Extension("AUTH"); ok {
+		if err := c.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return err
+	}
+	for _, addrTo := range to {
+		if err := c.Rcpt(addrTo); err != nil {
+			return err
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(msg); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }

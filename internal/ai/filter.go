@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Filter AI 过滤器
@@ -43,6 +44,16 @@ func NewFilter(interests string, minScore float64, batchSize int) *Filter {
 func (f *Filter) FilterNews(newsItems []NewsItem) ([]FilterResult, error) {
 	if len(newsItems) == 0 {
 		return []FilterResult{}, nil
+	}
+	// AI 过滤场景使用更短超时和更少重试，避免接口长时间阻塞
+	if f.client != nil {
+		if f.client.timeout == 0 || f.client.timeout > 30*time.Second {
+			f.client.timeout = 30 * time.Second
+			f.client.client.Timeout = 30 * time.Second
+		}
+		if f.client.numRetries > 1 {
+			f.client.numRetries = 1
+		}
 	}
 
 	// 分批处理

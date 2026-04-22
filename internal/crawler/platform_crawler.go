@@ -81,6 +81,9 @@ func (c *PlatformCrawler) fetchWithRetry(url, platformID string) ([]model.NewsIt
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json,text/plain,*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 
 	// 设置代理
 	if c.useProxy && c.proxyURL != "" {

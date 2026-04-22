@@ -109,6 +109,6 @@ func (s *Server) Start() error {
 func healthCheck(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"status":  "ok",
-		"message": "TrendRadar API is running",
+		"message": "趋势雷达 API is running",
 	})
 }

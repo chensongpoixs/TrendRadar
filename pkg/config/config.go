@@ -106,6 +106,7 @@ type ReportConfig struct {
 // FilterConfig 筛选配置
 type FilterConfig struct {
 	Method            string `mapstructure:"method"`
+	Interests         string `mapstructure:"interests"`
 	PrioritySortEnabled bool `mapstructure:"priority_sort_enabled"`
 }
 
@@ -284,10 +285,8 @@ func Init(configPath string) error {
 	if configPath != "" {
 		v.SetConfigFile(configPath)
 	} else {
-		v.SetConfigName("config")
-		v.SetConfigType("yaml")
-		v.AddConfigPath("./config")
-		v.AddConfigPath(".")
+		// 约定：后端配置文件固定放在 backend-go/config/config.yaml
+		v.SetConfigFile("./config/config.yaml")
 	}
 
 	// 读取环境变量
@@ -297,10 +296,7 @@ func Init(configPath string) error {
 
 	// 读取配置文件
 	if err := v.ReadInConfig(); err != nil {
-		if configPath != "" {
-			return err
-		}
-		// 配置文件不存在时不报错，使用默认值
+		return err
 	}
 
 	// 解码配置
@@ -318,7 +314,7 @@ func Init(configPath string) error {
 
 // setDefaults 设置默认值
 func setDefaults() {
-	v.SetDefault("app.name", "TrendRadar")
+	v.SetDefault("app.name", "趋势雷达")
 	v.SetDefault("app.environment", "development")
 	v.SetDefault("app.timezone", "Asia/Shanghai")
 	v.SetDefault("app.version", "1.0.0")
@@ -340,6 +336,7 @@ func setDefaults() {
 	v.SetDefault("report.rank_threshold", 5)
 
 	v.SetDefault("filter.method", "keyword")
+	v.SetDefault("filter.interests", "")
 
 	v.SetDefault("ai.model", "deepseek/deepseek-chat")
 	v.SetDefault("ai.timeout", 120)

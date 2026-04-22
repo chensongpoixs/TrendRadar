@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/trendradar/backend-go/pkg/config"
@@ -149,7 +150,15 @@ func (c *AIClient) doRequest(apiURL string, body []byte) (string, error) {
 // getAPIURL 获取 API URL
 func (c *AIClient) getAPIURL() string {
 	if c.apiBase != "" {
-		return fmt.Sprintf("%s/chat/completions", c.apiBase)
+		base := strings.TrimRight(c.apiBase, "/")
+		if strings.HasSuffix(base, "/chat/completions") {
+			return base
+		}
+		if strings.HasSuffix(base, "/v1") {
+			return base + "/chat/completions"
+		}
+		// OpenAI 兼容服务常见入口：{base}/v1/chat/completions
+		return base + "/v1/chat/completions"
 	}
 
 	// 默认使用 OpenAI 兼容端点

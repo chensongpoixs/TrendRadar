@@ -1,0 +1,126 @@
+app:
+  name: "趋势雷达"
+  environment: "development"
+  timezone: "Asia/Shanghai"
+  version: "1.0.0"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "debug"
+
+scheduler:
+  enabled: true
+  preset: "always_on" # 每小时执行一次任务并发送邮件
+
+database:
+  driver: "sqlite"
+  database: "trendradar.db"
+  max_idle_conns: 10
+  max_open_conns: 100
+
+platforms:
+  enabled: true
+  sources:
+    - id: "weibo"
+      name: "微博"
+      enabled: true
+    - id: "zhihu"
+      name: "知乎"
+      enabled: true
+    - id: "baidu"
+      name: "百度热搜"
+      enabled: true
+    - id: "toutiao"
+      name: "今日头条"
+      enabled: true
+    - id: "bilibili"
+      name: "哔哩哔哩"
+      enabled: true
+    - id: "wallstreetcn"
+      name: "华尔街见闻"
+      enabled: true
+    - id: "cls"
+      name: "财联社"
+      enabled: true
+    - id: "36kr"
+      name: "36氪"
+      enabled: true
+    - id: "huxiu"
+      name: "虎嗅"
+      enabled: true
+    - id: "ithome"
+      name: "IT之家"
+      enabled: true
+    - id: "juejin"
+      name: "掘金"
+      enabled: true
+    - id: "sspai"
+      name: "少数派"
+      enabled: true
+
+rss:
+  enabled: true
+  feeds:
+    - id: "hacker-news"
+      name: "Hacker News"
+      url: "https://hnrss.org/frontpage"
+      enabled: true
+      max_items: 50
+  freshness_filter:
+    enabled: true
+    max_age_days: 1
+
+filter:
+  method: "ai"
+  interests: "重点关注人工智能、科技创新、政策监管与产业政策相关资讯。优先保留 AI 模型、芯片、机器人、互联网科技、数字经济、政策发布、监管动向、产业升级、医疗教育等。"
+
+ai:
+  model: "gemma-4-26B-A4B-it-Q4_K_M"
+  api_base: "http://127.0.0.1:11434"
+  api_key: "not-needed"
+  timeout: 120
+  temperature: 1.0
+  max_tokens: 2000
+  num_retries: 10
+
+ai_analysis:
+  enabled: true
+  mode: "current"
+  max_news_for_analysis: 80
+
+notification:
+  enabled: true
+  channels:
+    email:
+      from: "15850774503@163.com" # 例如: your_mail@163.com
+      password: "SYhwjQhsBimapRd3" # 163 邮箱授权码（不是登录密码）
+      to: "15850774503@163.com"
+      smtp_server: "smtp.163.com"
+      smtp_port: "465"
+
+storage:
+  backend: "local"
+  formats:
+    sqlite: true
+    html: false
+    txt: false
+  local:
+    data_dir: "./data"
+    retention_days: 30
+
+advanced:
+  debug: false
+  crawler:
+    request_interval: 1000
+    use_proxy: false
+    default_proxy: ""
+  rss:
+    request_interval: 1000
+    timeout: 15
+    use_proxy: false
+    proxy_url: ""
+  weight:
+    rank: 0.6
+    frequency: 0.3
+    hotness: 0.1
