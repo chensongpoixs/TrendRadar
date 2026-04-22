@@ -1,7 +1,6 @@
 package ai
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -117,7 +116,7 @@ func (t *Translator) translateBatch(texts []string) ([]TranslationResult, error)
 	messages := []ChatMessage{
 		{
 			Role:    "system",
-			Content: "你是一个专业的翻译器，提供准确、流畅的翻译。",
+			Content: "你是一个专业的翻译器。请严格只返回纯 JSON 数组，不要包含 markdown 标记、代码围栏或任何解释文字。",
 		},
 		{
 			Role:    "user",
@@ -130,19 +129,13 @@ func (t *Translator) translateBatch(texts []string) ([]TranslationResult, error)
 		return nil, fmt.Errorf("AI chat failed: %w", err)
 	}
 
-	// 清理响应
-	response = strings.TrimPrefix(response, "```json")
-	response = strings.TrimSuffix(response, "```")
-	response = strings.TrimSpace(response)
-
-	// 解析响应
-	var rawResults []struct {
-		Index    int    `json:"index"`
-		Original string `json:"original"`
+	type transRaw struct {
+		Index      int    `json:"index"`
+		Original   string `json:"original"`
 		Translated string `json:"translated"`
 	}
-
-	if err := json.Unmarshal([]byte(response), &rawResults); err != nil {
+	rawResults, err := unmarshalFromLLM[[]transRaw](response)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse translation results: %w", err)
 	}
 

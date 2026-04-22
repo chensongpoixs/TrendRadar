@@ -148,7 +148,7 @@ func runCrawlAnalyzeAndNotify() error {
 	if err != nil {
 		return err
 	}
-	results = applyAIFocusFilter(results)
+	results = ai.ApplyFocusFilter(results)
 
 	// 本地持久化，方便前端查询历史
 	newsStorage := storage.NewNewsStorage()
@@ -179,10 +179,7 @@ func runCrawlAnalyzeAndNotify() error {
 		}
 	}
 
-	filterMode := "AI 关注标题过滤: 未启用"
-	if strings.ToLower(cfg.Filter.Method) == "ai" && strings.TrimSpace(cfg.Filter.Interests) != "" {
-		filterMode = fmt.Sprintf("AI 关注标题过滤: 已启用（兴趣词：%s）", strings.TrimSpace(cfg.Filter.Interests))
-	}
+	filterMode := emailFilterStrategyLine(cfg)
 
 	afterAICount := 0
 	for _, items := range results {
@@ -244,64 +241,6 @@ func runCrawlAnalyzeAndNotify() error {
 	}
 	log.Printf("Scheduled email sent successfully to %s (new: %d, dedup excluded: %d)", cfg.Notification.Channels.Email.To, mailCount, emailSkipped)
 	return nil
-}
-
-func applyAIFocusFilter(results map[string][]model.NewsItem) map[string][]model.NewsItem {
-	cfg := config.Get()
-	if cfg == nil || strings.ToLower(cfg.Filter.Method) != "ai" || strings.TrimSpace(cfg.Filter.Interests) == "" {
-		return results
-	}
-
-	flat := make([]ai.NewsItem, 0)
-	type itemRef struct {
-		platformID string
-		item       model.NewsItem
-	}
-	refs := make([]itemRef, 0)
-	for platformID, items := range results {
-		for _, item := range items {
-			flat = append(flat, ai.NewsItem{
-				Title:  item.Title,
-				Rank:   item.Rank,
-				Source: platformID,
-			})
-			refs = append(refs, itemRef{platformID: platformID, item: item})
-		}
-	}
-	if len(flat) == 0 {
-		return results
-	}
-
-	filter := ai.NewFilter(cfg.Filter.Interests, cfg.AIFilter.MinScore, cfg.AIFilter.BatchSize)
-	filterResults, err := filter.FilterNews(flat)
-	if err != nil {
-		log.Printf("AI focus filter failed in scheduler, fallback to original data: %v", err)
-		return results
-	}
-	minScore := cfg.AIFilter.MinScore
-	if minScore <= 0 {
-		minScore = 0.7
-	}
-	filterResults = ai.GetFilteredItems(filterResults, minScore)
-
-	allowed := make(map[string]bool)
-	for _, r := range filterResults {
-		aiItem, ok := r.Item.(ai.NewsItem)
-		if !ok {
-			continue
-		}
-		allowed[aiItem.Source+"::"+aiItem.Title] = true
-	}
-
-	kept := make(map[string][]model.NewsItem)
-	for _, ref := range refs {
-		key := ref.platformID + "::" + ref.item.Title
-		if allowed[key] {
-			kept[ref.platformID] = append(kept[ref.platformID], ref.item)
-		}
-	}
-	log.Printf("Scheduled AI focus filter applied with min_score=%.2f: %d -> %d", minScore, len(refs), len(filterResults))
-	return kept
 }
 
 func formatNewsDetails(results map[string][]model.NewsItem, idToName map[string]string, fallbackTime time.Time) string {
@@ -459,4 +398,37 @@ func formatEmailHTML(results map[string][]model.NewsItem, idToName map[string]st
 	}
 	b.WriteString(`</div><div class="foot">由 趋势雷达 生成 · GitHub 开源项目</div></div></body></html>`)
 	return b.String()
+}
+
+// emailFilterStrategyLine 供邮件「过滤策略」一行展示：不内嵌整份兴趣全文，避免长文刷屏。
+func emailFilterStrategyLine(cfg *config.Config) string {
+	if strings.ToLower(cfg.Filter.Method) != "ai" || strings.TrimSpace(cfg.Filter.Interests) == "" {
+		return "AI 关注标题过滤: 未启用"
+	}
+	if f := strings.TrimSpace(cfg.Filter.InterestsFile); f != "" {
+		return "AI 关注标题过滤: 已启用（兴趣配置: " + f + "）"
+	}
+	line := firstNonCommentLineForEmail(cfg.Filter.Interests)
+	if line == "" {
+		return "AI 关注标题过滤: 已启用"
+	}
+	runes := []rune(line)
+	if len(runes) > 100 {
+		line = string(runes[:100]) + "…"
+	}
+	return "AI 关注标题过滤: 已启用（兴趣摘要: " + line + "）"
+}
+
+func firstNonCommentLineForEmail(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line
+	}
+	return ""
 }

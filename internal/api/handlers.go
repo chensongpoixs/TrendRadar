@@ -40,7 +40,7 @@ func GetLatestNews(c *gin.Context) {
 
 	// 可选 AI 兴趣筛选：默认关闭，避免接口耗时导致前端超时
 	if useAIFilter {
-		results = applyAIFocusFilter(results)
+		results = ai.ApplyFocusFilter(results)
 	}
 
 	// 保存到数据库
@@ -110,69 +110,6 @@ func buildAINewsSummary(results map[string][]model.NewsItem, idToName map[string
 		"outlook_strategy":     analysis.OutlookStrategy,
 		"raw_response":         analysis.RawResponse,
 	}, nil
-}
-
-func applyAIFocusFilter(results map[string][]model.NewsItem) map[string][]model.NewsItem {
-	cfg := config.Get()
-	if cfg == nil || strings.ToLower(cfg.Filter.Method) != "ai" || strings.TrimSpace(cfg.Filter.Interests) == "" {
-		return results
-	}
-
-	flat := make([]ai.NewsItem, 0)
-	type itemRef struct {
-		platformID string
-		item       model.NewsItem
-	}
-	refs := make([]itemRef, 0)
-	for platformID, items := range results {
-		for _, item := range items {
-			flat = append(flat, ai.NewsItem{
-				Title:  item.Title,
-				Rank:   item.Rank,
-				Source: platformID,
-			})
-			refs = append(refs, itemRef{
-				platformID: platformID,
-				item:       item,
-			})
-		}
-	}
-	if len(flat) == 0 {
-		return results
-	}
-
-	filter := ai.NewFilter(cfg.Filter.Interests, cfg.AIFilter.MinScore, cfg.AIFilter.BatchSize)
-	filterResults, err := filter.FilterNews(flat)
-	if err != nil {
-		log.Printf("AI focus filter failed, fallback to unfiltered results: %v", err)
-		return results
-	}
-	minScore := cfg.AIFilter.MinScore
-	if minScore <= 0 {
-		minScore = 0.7
-	}
-	filterResults = ai.GetFilteredItems(filterResults, minScore)
-
-	kept := make(map[string][]model.NewsItem)
-	// FilterResult.Item 是 ai.NewsItem，这里按标题+来源匹配回原始 model.NewsItem
-	allowed := make(map[string]bool)
-	for _, r := range filterResults {
-		aiItem, ok := r.Item.(ai.NewsItem)
-		if !ok {
-			continue
-		}
-		key := aiItem.Source + "::" + aiItem.Title
-		allowed[key] = true
-	}
-	for _, ref := range refs {
-		key := ref.platformID + "::" + ref.item.Title
-		if allowed[key] {
-			kept[ref.platformID] = append(kept[ref.platformID], ref.item)
-		}
-	}
-
-	log.Printf("AI focus filter applied with min_score=%.2f: %d -> %d", minScore, len(refs), len(filterResults))
-	return kept
 }
 
 // GetNewsByDate 按日期获取新闻

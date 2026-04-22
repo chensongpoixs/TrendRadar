@@ -1,7 +1,6 @@
 package ai
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -17,10 +16,10 @@ type Filter struct {
 
 // FilterResult 过滤结果
 type FilterResult struct {
-	Item   interface{} `json:"item"`   // 原始项
-	Score  float64     `json:"score"`  // 兴趣匹配分数
-	Reason string      `json:"reason"` // 过滤理由
-	Tags   []string    `json:"tags"`   // 匹配的兴趣标签
+	Item   NewsItem `json:"item"`   // 原始项
+	Score  float64  `json:"score"`  // 兴趣匹配分数
+	Reason string   `json:"reason"` // 过滤理由
+	Tags   []string `json:"tags"`   // 匹配的兴趣标签
 }
 
 // NewFilter 创建过滤器
@@ -78,9 +77,8 @@ func (f *Filter) FilterNews(newsItems []NewsItem) ([]FilterResult, error) {
 
 // filterBatch 过滤一批新闻
 func (f *Filter) filterBatch(newsItems []NewsItem) ([]FilterResult, error) {
-	// 构建批处理请求
 	var newsList strings.Builder
-	newsList.WriteString("请分析以下新闻是否符合我的兴趣，并为每条新闻打分（0-1）：\n\n")
+	newsList.WriteString("请分析以下新闻是否符合我的兴趣，并为每条新闻打分（0-1）。\n\n")
 	newsList.WriteString("我的兴趣描述：\n")
 	newsList.WriteString(f.interests)
 	newsList.WriteString("\n\n新闻列表：\n")
@@ -93,21 +91,14 @@ func (f *Filter) filterBatch(newsItems []NewsItem) ([]FilterResult, error) {
 		newsList.WriteString(fmt.Sprintf("%d. %s%s\n", i+1, item.Title, rankStr))
 	}
 
-	newsList.WriteString("\n\n请按以下 JSON 格式返回结果：\n")
-	newsList.WriteString("[\n")
-	newsList.WriteString("  {\n")
-	newsList.WriteString("    \"index\": 0, // 新闻索引（从 0 开始）\n")
-	newsList.WriteString("    \"score\": 0-1 之间的分数，表示兴趣匹配度\n")
-	newsList.WriteString("    \"reason\": \"简短的评分理由\",\n")
-	newsList.WriteString("    \"tags\": [\"匹配的兴趣标签 1\", \"匹配的兴趣标签 2\"]\n")
-	newsList.WriteString("  }\n")
-	newsList.WriteString("]\n")
+	newsList.WriteString("\n\n请为上述每条新闻返回一个 JSON 数组，示例（2 条时）：\n")
+	newsList.WriteString(`[{"index":0,"score":0.85,"reason":"涉及AI模型发布","tags":["大模型"]},{"index":1,"score":0.2,"reason":"与兴趣无关","tags":[]}]`)
+	newsList.WriteString("\n\n字段说明：index 从 0 开始对应新闻序号，score 为 0-1 浮点数，reason 简短理由，tags 为匹配的兴趣标签数组。\n")
 
-	// 调用 AI 模型
 	messages := []ChatMessage{
 		{
 			Role:    "system",
-			Content: "你是一个智能新闻过滤器，请根据用户的兴趣描述过滤新闻。",
+			Content: "你是一个智能新闻过滤器。请严格只返回纯 JSON 数组，不要包含 markdown 标记、代码围栏或任何解释文字。",
 		},
 		{
 			Role:    "user",
@@ -120,20 +111,15 @@ func (f *Filter) filterBatch(newsItems []NewsItem) ([]FilterResult, error) {
 		return nil, fmt.Errorf("AI chat failed: %w", err)
 	}
 
-	// 清理响应
-	response = strings.TrimPrefix(response, "`")
-	response = strings.TrimSuffix(response, "`")
-	response = strings.TrimSpace(response)
-
-	// 解析响应
-	var rawResults []struct {
-		Index  int    `json:"index"`
-		Score  float64 `json:"score"`
-		Reason string `json:"reason"`
+	// 从 LLM 响应中提取 JSON
+	type filterRaw struct {
+		Index  int      `json:"index"`
+		Score  float64  `json:"score"`
+		Reason string   `json:"reason"`
 		Tags   []string `json:"tags"`
 	}
-
-	if err := json.Unmarshal([]byte(response), &rawResults); err != nil {
+	rawResults, err := unmarshalFromLLM[[]filterRaw](response)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse filter results: %w", err)
 	}
 
@@ -183,28 +169,3 @@ func GetFilteredItems(results []FilterResult, minScore float64) []FilterResult {
 	return filtered
 }
 
-// GetInterestedTags 获取感兴趣的话题标签
-func (f *Filter) GetInterestedTags(text string) ([]string, error) {
-	messages := []ChatMessage{
-		{
-			Role:    "system",
-			Content: fmt.Sprintf("根据以下兴趣描述，分析文本涉及的话题标签：\n%s", f.interests),
-		},
-		{
-			Role:    "user",
-			Content: fmt.Sprintf("请为以下文本提取 3-5 个最相关的兴趣标签，返回 JSON 数组：\n\n%s", text),
-		},
-	}
-
-	response, err := f.client.Chat(messages)
-	if err != nil {
-		return nil, err
-	}
-
-	var tags []string
-	if err := json.Unmarshal([]byte(response), &tags); err != nil {
-		return nil, fmt.Errorf("failed to parse tags: %w", err)
-	}
-
-	return tags, nil
-}

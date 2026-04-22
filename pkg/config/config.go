@@ -1,7 +1,9 @@
 package config
 
 import (
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -107,6 +109,7 @@ type ReportConfig struct {
 type FilterConfig struct {
 	Method            string `mapstructure:"method"`
 	Interests         string `mapstructure:"interests"`
+	InterestsFile     string `mapstructure:"interests_file"` // 非空时从该路径读入全文覆盖 Interests；相对路径相对 config.yaml 所在目录
 	PrioritySortEnabled bool `mapstructure:"priority_sort_enabled"`
 }
 
@@ -309,6 +312,45 @@ func Init(configPath string) error {
 		return err
 	}
 
+	cfgPath := configPath
+	if cfgPath == "" {
+		cfgPath = v.ConfigFileUsed()
+	}
+	if err := applyInterestsFile(cfgPath, instance); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// applyInterestsFile 若配置了 interests_file，则从与 config.yaml 同目录解析路径并读入，覆盖 filter.interests。
+// 文件不存在或不可读时记录日志并保留 yaml 中的 interests 回退。
+func applyInterestsFile(configYAMLPath string, c *Config) error {
+	if c == nil {
+		return nil
+	}
+	rel := strings.TrimSpace(c.Filter.InterestsFile)
+	if rel == "" {
+		return nil
+	}
+	if configYAMLPath == "" {
+		log.Printf("filter: interests_file=%q set but config path unknown, skip file load", rel)
+		return nil
+	}
+	base := filepath.Dir(configYAMLPath)
+	full := filepath.Clean(filepath.Join(base, rel))
+	b, err := os.ReadFile(full)
+	if err != nil {
+		log.Printf("filter: could not read interests_file %s: %v (using filter.interests from yaml if any)", full, err)
+		return nil
+	}
+	text := strings.TrimSpace(string(b))
+	if text == "" {
+		log.Printf("filter: interests_file %s is empty, keeping filter.interests from yaml", full)
+		return nil
+	}
+	c.Filter.Interests = text
+	log.Printf("filter: loaded interests from %s (%d bytes)", full, len(text))
 	return nil
 }
 

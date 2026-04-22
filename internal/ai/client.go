@@ -2,10 +2,13 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -33,10 +36,10 @@ type ChatMessage struct {
 
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Model      string        `json:"model"`
-	Messages   []ChatMessage `json:"messages"`
-	Temperature float64      `json:"temperature,omitempty"`
-	MaxTokens   int         `json:"max_tokens,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Temperature float64       `json:"temperature,omitempty"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
 }
 
 // ChatResponse 聊天响应
@@ -51,6 +54,24 @@ type ChatResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
+}
+
+// apiError 用于区分 HTTP 状态码的错误
+type apiError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("API returned status %d: %s", e.StatusCode, e.Body)
+}
+
+func isRetryable(err error) bool {
+	if ae, ok := err.(*apiError); ok {
+		return ae.StatusCode == 429 || ae.StatusCode >= 500
+	}
+	// 网络超时、连接重置等视为可重试
+	return true
 }
 
 // NewAIClient 创建 AI 客户端
@@ -71,80 +92,121 @@ func NewAIClient() *AIClient {
 	}
 }
 
-// Chat 调用 AI 模型进行对话
+// Chat 调用 AI 模型进行对话（使用 background context）
 func (c *AIClient) Chat(messages []ChatMessage) (string, error) {
-	// 构建请求
+	return c.ChatWithContext(context.Background(), messages)
+}
+
+// ChatWithContext 调用 AI 模型（可取消/超时）
+func (c *AIClient) ChatWithContext(ctx context.Context, messages []ChatMessage) (string, error) {
 	req := ChatRequest{
-		Model:      c.model,
-		Messages:   messages,
+		Model:       c.model,
+		Messages:    messages,
 		Temperature: c.temperature,
 	}
-
 	if c.maxTokens > 0 {
 		req.MaxTokens = c.maxTokens
 	}
 
-	// 序列化请求
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// 确定 API 端点
 	apiURL := c.getAPIURL()
 
-	// 重试逻辑
 	var lastError error
 	for attempt := 0; attempt <= c.numRetries; attempt++ {
-		resp, err := c.doRequest(apiURL, body)
-		if err == nil {
-			return resp, nil
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
+
+		start := time.Now()
+		content, usage, err := c.doRequest(ctx, apiURL, body)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			log.Printf("AI request OK (%s) tokens: prompt=%d completion=%d total=%d",
+				elapsed.Round(time.Millisecond), usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+			return content, nil
+		}
+
 		lastError = err
 
+		if !isRetryable(err) {
+			log.Printf("AI request failed (non-retryable): %v", err)
+			return "", err
+		}
+
 		if attempt < c.numRetries {
-			log.Printf("AI request failed, retrying (%d/%d)...", attempt+1, c.numRetries)
-			time.Sleep(time.Duration(attempt+1) * time.Second)
+			backoff := expBackoff(attempt)
+			log.Printf("AI request failed (%s), retrying (%d/%d) after %s: %v",
+				elapsed.Round(time.Millisecond), attempt+1, c.numRetries, backoff, err)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(backoff):
+			}
 		}
 	}
 
 	return "", fmt.Errorf("AI request failed after %d retries: %w", c.numRetries+1, lastError)
 }
 
-// doRequest 执行 HTTP 请求
-func (c *AIClient) doRequest(apiURL string, body []byte) (string, error) {
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(body))
+// expBackoff 指数退避 + 随机抖动
+func expBackoff(attempt int) time.Duration {
+	base := math.Pow(2, float64(attempt)) * 1000 // ms
+	jitter := rand.Float64() * 500                // 0-500ms
+	ms := base + jitter
+	if ms > 30000 {
+		ms = 30000
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+type usageInfo struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+// doRequest 执行 HTTP 请求，返回内容、token 用量与错误
+func (c *AIClient) doRequest(ctx context.Context, apiURL string, body []byte) (string, usageInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", usageInfo{}, err
 	}
 
-	// 设置头
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	// 执行请求
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", usageInfo{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", usageInfo{}, &apiError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
-	// 解析响应
 	var chatResp ChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return "", err
+		return "", usageInfo{}, err
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
+		return "", usageInfo{}, fmt.Errorf("no choices in response")
 	}
 
-	return chatResp.Choices[0].Message.Content, nil
+	u := usageInfo{
+		PromptTokens:     chatResp.Usage.PromptTokens,
+		CompletionTokens: chatResp.Usage.CompletionTokens,
+		TotalTokens:      chatResp.Usage.TotalTokens,
+	}
+
+	return chatResp.Choices[0].Message.Content, u, nil
 }
 
 // getAPIURL 获取 API URL
@@ -157,34 +219,8 @@ func (c *AIClient) getAPIURL() string {
 		if strings.HasSuffix(base, "/v1") {
 			return base + "/chat/completions"
 		}
-		// OpenAI 兼容服务常见入口：{base}/v1/chat/completions
 		return base + "/v1/chat/completions"
 	}
-
-	// 默认使用 OpenAI 兼容端点
 	return "https://api.openai.com/v1/chat/completions"
-}
-
-// AnalyzeNews 分析新闻内容
-func (c *AIClient) AnalyzeNews(newsContent string, prompt string) (AnalysisResult, error) {
-	messages := []ChatMessage{
-		{
-			Role:    "system",
-			Content: "你是一个新闻分析专家，请分析以下新闻内容。",
-		},
-		{
-			Role:    "user",
-			Content: fmt.Sprintf("%s\n\n新闻内容：\n%s", prompt, newsContent),
-		},
-	}
-
-	response, err := c.Chat(messages)
-	if err != nil {
-		return AnalysisResult{}, err
-	}
-
-	return AnalysisResult{
-		RawResponse: response,
-	}, nil
 }
 

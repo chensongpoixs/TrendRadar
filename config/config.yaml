@@ -69,9 +69,13 @@ rss:
     enabled: true
     max_age_days: 1
 
+# AI 兴趣：默认从同目录 ai_interests.txt 加载（与根目录 config/ai_analysis_prompt 分析视角对齐）
+# 不填 interests_file 时，仅使用下方 interests 内联文本
 filter:
   method: "ai"
-  interests: "重点关注人工智能、科技创新、政策监管与产业政策相关资讯。优先保留 AI 模型、芯片、机器人、互联网科技、数字经济、政策发布、监管动向、产业升级、医疗教育等。"
+  interests_file: "ai_interests.txt"
+  # 当 ai_interests.txt 不存在或不可读时的回退（可留空，则 AI 过滤不生效直到文件就绪）
+  interests: ""
 
 ai:
   model: "gemma-4-26B-A4B-it-Q4_K_M"
