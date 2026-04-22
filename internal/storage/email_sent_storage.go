@@ -1,79 +1,119 @@
 package storage
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
+	"sort"
 	"time"
 
 	"github.com/trendradar/backend-go/internal/core"
 	"github.com/trendradar/backend-go/pkg/model"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// EmailItemSignature 生成邮件去重签名：优先稳定 URL，否则 平台+标题
-func EmailItemSignature(platformID string, item model.NewsItem) string {
-	u := strings.TrimSpace(item.URL)
-	if u == "" {
-		u = strings.TrimSpace(item.MobileURL)
-	}
-	if u != "" {
-		return sha256hex(strings.ToLower(u))
-	}
-	raw := platformID + "\x00" + strings.TrimSpace(item.Title)
-	return sha256hex(raw)
-}
-
-func sha256hex(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
-}
+const emailDedupINChunk = 500
 
 // FilterNotYetEmailed 筛掉历史已发邮件中出现过的热榜条目，返回新条目与跳过数量
+// 跳过含：库中已存在任一同类指纹、本批内按主指纹重复（先出现者保留）
 func FilterNotYetEmailed(results map[string][]model.NewsItem) (map[string][]model.NewsItem, int, error) {
 	if len(results) == 0 {
 		return results, 0, nil
 	}
-	type pair struct {
+	type row struct {
 		platformID string
 		item       model.NewsItem
-		sig        string
+		primary    string
+		matchSigs  []string
 	}
-	var pairs []pair
-	sigs := make([]string, 0)
-	for pid, items := range results {
-		for _, item := range items {
-			sig := EmailItemSignature(pid, item)
-			pairs = append(pairs, pair{platformID: pid, item: item, sig: sig})
-			sigs = append(sigs, sig)
+	var rows []row
+	for _, pid := range sortedPlatformKeys(results) {
+		for _, item := range results[pid] {
+			pri := EmailItemSignature(pid, item)
+			ms := matchSigs(pid, item)
+			rows = append(rows, row{platformID: pid, item: item, primary: pri, matchSigs: ms})
 		}
 	}
-	if len(sigs) == 0 {
+	if len(rows) == 0 {
 		return map[string][]model.NewsItem{}, 0, nil
 	}
 	db := core.GetDB()
 	if db == nil {
-		// 无库则不去重
 		return results, 0, nil
 	}
-	var existing []model.EmailSentFingerprint
-	if err := db.Where("sig IN ?", sigs).Find(&existing).Error; err != nil {
+
+	sigSet := make(map[string]struct{})
+	for _, r := range rows {
+		for _, s := range r.matchSigs {
+			sigSet[s] = struct{}{}
+		}
+	}
+	allSigs := keysOfSet(sigSet)
+	existSet, err := loadExistingSigs(db, allSigs)
+	if err != nil {
 		return nil, 0, err
 	}
-	existSet := make(map[string]bool, len(existing))
-	for _, e := range existing {
-		existSet[e.Sig] = true
-	}
+
 	kept := make(map[string][]model.NewsItem)
 	skipped := 0
-	for _, p := range pairs {
-		if existSet[p.sig] {
+	batchSeen := make(map[string]struct{})
+	for _, r := range rows {
+		if _, dup := batchSeen[r.primary]; dup {
 			skipped++
 			continue
 		}
-		kept[p.platformID] = append(kept[p.platformID], p.item)
+		history := false
+		for _, s := range r.matchSigs {
+			if existSet[s] {
+				history = true
+				break
+			}
+		}
+		if history {
+			skipped++
+			continue
+		}
+		batchSeen[r.primary] = struct{}{}
+		kept[r.platformID] = append(kept[r.platformID], r.item)
 	}
 	return kept, skipped, nil
+}
+
+func sortedPlatformKeys(m map[string][]model.NewsItem) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+func keysOfSet(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func loadExistingSigs(db *gorm.DB, sigs []string) (map[string]bool, error) {
+	exist := make(map[string]bool)
+	if len(sigs) == 0 {
+		return exist, nil
+	}
+	for i := 0; i < len(sigs); i += emailDedupINChunk {
+		end := i + emailDedupINChunk
+		if end > len(sigs) {
+			end = len(sigs)
+		}
+		chunk := sigs[i:end]
+		var existing []model.EmailSentFingerprint
+		if err := db.Where("sig IN ?", chunk).Find(&existing).Error; err != nil {
+			return nil, err
+		}
+		for _, e := range existing {
+			exist[e.Sig] = true
+		}
+	}
+	return exist, nil
 }
 
 // RecordEmailSent 邮件发送成功后记录指纹（可重复调用，冲突忽略）
@@ -84,8 +124,8 @@ func RecordEmailSent(results map[string][]model.NewsItem) error {
 	}
 	now := time.Now()
 	var rows []model.EmailSentFingerprint
-	for pid, items := range results {
-		for _, item := range items {
+	for _, pid := range sortedPlatformKeys(results) {
+		for _, item := range results[pid] {
 			rows = append(rows, model.EmailSentFingerprint{
 				Sig:         EmailItemSignature(pid, item),
 				FirstSentAt: now,
@@ -100,3 +140,4 @@ func RecordEmailSent(results map[string][]model.NewsItem) error {
 		DoNothing: true,
 	}).CreateInBatches(&rows, 200).Error
 }
+

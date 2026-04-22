@@ -11,7 +11,8 @@ server:
 
 scheduler:
   enabled: true
-  preset: "always_on" # 每小时执行一次任务并发送邮件
+  # 可选: always_on(每天24次整点) daytime_8_23(每天8–23点整点) morning_evening office_hours night_owl
+  preset: "daytime_8_23" # 每天 8:00–23:00 每个整点拉取并邮件推送
 
 database:
   driver: "sqlite"

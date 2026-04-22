@@ -75,8 +75,12 @@ func (s *Scheduler) configureCronJobs() {
 
 	switch s.preset {
 	case "always_on":
-		// 每小时整点运行（带秒字段）
+		// 每天 0–23 点每小时整点运行
 		addJob("0 0 * * * *")
+
+	case "daytime_8_23":
+		// 每天 8:00–23:00 每个整点各一次（共 16 次）
+		addJob("0 0 8-23 * * *")
 
 	case "morning_evening":
 		// 早上 8 点和晚上 8 点运行
