@@ -1,11 +1,12 @@
 package ai
 
 import (
-	"log"
 	"strings"
 
 	"github.com/trendradar/backend-go/pkg/config"
+	"github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
+	"go.uber.org/zap"
 )
 
 // ApplyFocusFilter 按 AI 兴趣描述过滤热榜条目，返回命中的子集。
@@ -36,17 +37,24 @@ func ApplyFocusFilter(results map[string][]model.NewsItem) map[string][]model.Ne
 		return results
 	}
 
-	filter := NewFilter(cfg.Filter.Interests, cfg.AIFilter.MinScore, cfg.AIFilter.BatchSize)
-	filterResults, err := filter.FilterNews(flat)
+	filter := NewFilter(cfg.Filter.Interests, cfg.AIFilter.MinScore, FilterOptions{
+		BatchSize:       cfg.AIFilter.BatchSize,
+		MaxInputChars:   cfg.AIFilter.MaxInputChars,
+		BatchIntervalMS: cfg.AIFilter.BatchInterval,
+		MaxOutputTokens: cfg.AIFilter.MaxOutputTokens,
+	})
+	allFilterResults, err := filter.FilterNews(flat)
 	if err != nil {
-		log.Printf("AI focus filter failed, fallback to original data: %v", err)
+		logger.WithComponent("aifilter").Error("focus filter failed, using original data", zap.Error(err))
 		return results
 	}
 	minScore := cfg.AIFilter.MinScore
 	if minScore <= 0 {
 		minScore = 0.7
 	}
-	filterResults = GetFilteredItems(filterResults, minScore)
+	keptResults := GetFilteredItems(allFilterResults, minScore)
+	logAIFocusFilterDetails(minScore, len(refs), allFilterResults, keptResults)
+	filterResults := keptResults
 
 	allowed := make(map[string]bool)
 	for _, r := range filterResults {
@@ -60,6 +68,51 @@ func ApplyFocusFilter(results map[string][]model.NewsItem) map[string][]model.Ne
 			kept[ref.platformID] = append(kept[ref.platformID], ref.item)
 		}
 	}
-	log.Printf("AI focus filter applied with min_score=%.2f: %d -> %d", minScore, len(refs), len(filterResults))
 	return kept
+}
+
+func logAIFocusFilterDetails(minScore float64, inputCount int, all []FilterResult, kept []FilterResult) {
+	lg := logger.WithComponent("aifilter")
+	keptSet := make(map[string]struct{}, len(kept))
+	for _, r := range kept {
+		keptSet[r.Item.Source+"::"+r.Item.Title] = struct{}{}
+	}
+	dropped := inputCount - len(kept)
+	if dropped < 0 {
+		dropped = 0
+	}
+	lg.Info("aifilter summary",
+		zap.Float64("min_score", minScore), zap.Int("input", inputCount),
+		zap.Int("model_rows", len(all)), zap.Int("kept", len(kept)), zap.Int("dropped", dropped))
+	if len(all) != inputCount {
+		lg.Warn("model row count mismatch", zap.Int("model_rows", len(all)), zap.Int("input", inputCount))
+	}
+	for i, r := range all {
+		_, pass := keptSet[r.Item.Source+"::"+r.Item.Title]
+		passStr := "drop"
+		if pass {
+			passStr = "keep"
+		}
+		tags := strings.Join(r.Tags, ",")
+		if tags == "" {
+			tags = "-"
+		}
+		title := truncateRunesForLog(strings.TrimSpace(r.Item.Title), 120)
+		reason := truncateRunesForLog(strings.TrimSpace(r.Reason), 200)
+		src := strings.TrimSpace(r.Item.Source)
+		if src == "" {
+			src = "?"
+		}
+		lg.Debug("aifilter line",
+			zap.Int("idx", i), zap.String("pass", passStr), zap.Float64("score", r.Score),
+			zap.String("src", src), zap.String("title", title), zap.String("reason", reason), zap.String("tags", tags))
+	}
+}
+
+func truncateRunesForLog(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }

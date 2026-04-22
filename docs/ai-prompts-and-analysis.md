@@ -22,7 +22,7 @@
 
 - **端点拼接**（`client.getAPIURL`）：`api_base` 去尾 `/` 后，若已以 `/chat/completions` 结尾则直用；若以 `/v1` 结尾则拼 `.../chat/completions`；否则拼 `.../v1/chat/completions`。
 - **鉴权**：`Authorization: Bearer {api_key}`（本地 Ollama 等可配占位 key）。
-- **重试**：`ai.num_retries` 控制失败重试次数；**仅兴趣过滤**在 `FilterNews` 内会把客户端重试**强制改为最多 1 次**、超时在 **>30s 时压到 30s**（见 `filter.go`），避免长阻塞。
+- **重试**：`ai.num_retries` 控制失败重试次数；**仅兴趣过滤**在 `FilterNews` 内会把客户端重试**强制改为最多 1 次**；HTTP 超时时若未设置则**继承 `ai.timeout`（秒）**（见 `filter.go`）。
 
 ---
 
@@ -50,12 +50,15 @@ filter:
 | `filter.interests_file` | 可选；非空则从该路径读入**全文**覆盖内联 `interests`；路径**相对** `config.yaml` 所在目录 |
 | `filter.interests` | 内联兴趣说明；**若成功加载 interests_file 则被覆盖**；也可单独使用（不设 interests_file） |
 | `ai_filter.min_score` | 单条**保留阈值**；≤0 时逻辑里默认 `0.7` |
-| `ai_filter.batch_size` | 每批送入模型的标题数；≤0 时默认 `200` |
+| `ai_filter.batch_size` | 每批**最多**标题数；≤0 时默认 `20`；与 `max_input_chars` 取更紧约束 |
+| `ai_filter.max_input_chars` | 单批 `user` 正文字符（rune）上限；`0` 表示仅按 `batch_size` 切，见 `docs/ai-filter-batching.md` |
+| `ai_filter.batch_interval` | 批次间间隔（毫秒） |
+| `ai_filter.max_output_tokens` | 仅过滤请求的 `max_tokens`；`0` 用全局 `ai.max_tokens` |
 
 ### 3.2 数据流
 
 1. 将各平台 `NewsItem` 转为 `ai.NewsItem`（`Title`、`Rank`、`Source=platformID`）。  
-2. 按 `batch_size` 分批。  
+2. 按 `batch_size` 与 `max_input_chars` 分批（串行、合并结果，见 `docs/ai-filter-batching.md`）。  
 3. 每批构造 **2 条消息**：  
    - **system**：`你是一个智能新闻过滤器，请根据用户的兴趣描述过滤新闻。`  
    - **user**：见下节「用户提示词结构」。  

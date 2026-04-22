@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"math/rand"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"time"
 
 	"github.com/trendradar/backend-go/pkg/config"
+	"github.com/trendradar/backend-go/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // AIClient AI 客户端
@@ -94,17 +95,29 @@ func NewAIClient() *AIClient {
 
 // Chat 调用 AI 模型进行对话（使用 background context）
 func (c *AIClient) Chat(messages []ChatMessage) (string, error) {
-	return c.ChatWithContext(context.Background(), messages)
+	return c.chatWithMaxOutput(context.Background(), messages, 0)
+}
+
+// ChatWithMaxOutput 使用指定 max_tokens（>0 时覆盖全局 ai.max_tokens），用于兴趣过滤等需长 JSON 的场景。
+func (c *AIClient) ChatWithMaxOutput(messages []ChatMessage, maxOutputTokens int) (string, error) {
+	return c.chatWithMaxOutput(context.Background(), messages, maxOutputTokens)
 }
 
 // ChatWithContext 调用 AI 模型（可取消/超时）
 func (c *AIClient) ChatWithContext(ctx context.Context, messages []ChatMessage) (string, error) {
+	return c.chatWithMaxOutput(ctx, messages, 0)
+}
+
+func (c *AIClient) chatWithMaxOutput(ctx context.Context, messages []ChatMessage, maxOutputTokens int) (string, error) {
 	req := ChatRequest{
 		Model:       c.model,
 		Messages:    messages,
 		Temperature: c.temperature,
 	}
-	if c.maxTokens > 0 {
+	switch {
+	case maxOutputTokens > 0:
+		req.MaxTokens = maxOutputTokens
+	case c.maxTokens > 0:
 		req.MaxTokens = c.maxTokens
 	}
 
@@ -126,22 +139,29 @@ func (c *AIClient) ChatWithContext(ctx context.Context, messages []ChatMessage) 
 		elapsed := time.Since(start)
 
 		if err == nil {
-			log.Printf("AI request OK (%s) tokens: prompt=%d completion=%d total=%d",
-				elapsed.Round(time.Millisecond), usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+			logger.WithComponent("ai").Info("request ok",
+				zap.String("elapsed", elapsed.Round(time.Millisecond).String()),
+				zap.Int("prompt_tokens", usage.PromptTokens),
+				zap.Int("completion_tokens", usage.CompletionTokens),
+				zap.Int("total_tokens", usage.TotalTokens),
+				zap.String("assistant_message_content_full", content),
+			)
 			return content, nil
 		}
 
 		lastError = err
 
 		if !isRetryable(err) {
-			log.Printf("AI request failed (non-retryable): %v", err)
+			logger.WithComponent("ai").Error("request non-retryable", zap.Error(err))
 			return "", err
 		}
 
 		if attempt < c.numRetries {
 			backoff := expBackoff(attempt)
-			log.Printf("AI request failed (%s), retrying (%d/%d) after %s: %v",
-				elapsed.Round(time.Millisecond), attempt+1, c.numRetries, backoff, err)
+			logger.WithComponent("ai").Warn("request failed, will retry",
+				zap.String("elapsed", elapsed.Round(time.Millisecond).String()),
+				zap.Int("attempt", attempt+1), zap.Int("max_retries", c.numRetries),
+				zap.String("backoff", backoff.String()), zap.Error(err))
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
@@ -180,19 +200,39 @@ func (c *AIClient) doRequest(ctx context.Context, apiURL string, body []byte) (s
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
+	fullURL := req.URL.String()
+	if fullURL == "" {
+		fullURL = apiURL
+	}
+	logger.WithComponent("ai").Info("http request full",
+		zap.String("method", req.Method),
+		zap.String("url", fullURL),
+		zap.Any("request_headers", req.Header),
+		zap.String("request_body", string(body)),
+	)
+
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", usageInfo{}, err
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", usageInfo{}, err
+	}
+	logger.WithComponent("ai").Info("http response full",
+		zap.Int("status", resp.StatusCode),
+		zap.Any("response_headers", resp.Header),
+		zap.String("response_body", string(respBody)),
+	)
+
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
 		return "", usageInfo{}, &apiError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var chatResp ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
 		return "", usageInfo{}, err
 	}
 

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/trendradar/backend-go/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // extractJSON 从 LLM 响应中提取第一个合法 JSON 数组或对象。
@@ -105,11 +108,20 @@ func unmarshalFromLLM[T any](raw string) (T, error) {
 	var zero T
 	jsonStr, err := extractJSON(raw)
 	if err != nil {
-		return zero, fmt.Errorf("extractJSON: %w\nraw response (first 500 chars): %.500s", err, raw)
+		logger.WithComponent("ai").Error("unmarshalFromLLM extractJSON failed",
+			zap.Error(err),
+			zap.String("raw_llm_message_full", raw),
+		)
+		return zero, fmt.Errorf("extractJSON: %w", err)
 	}
 	var result T
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return zero, fmt.Errorf("json.Unmarshal: %w\njson fragment (first 500 chars): %.500s", err, jsonStr)
+		logger.WithComponent("ai").Error("unmarshalFromLLM json.Unmarshal failed",
+			zap.Error(err),
+			zap.String("raw_llm_message_full", raw),
+			zap.String("json_fragment_full", jsonStr),
+		)
+		return zero, fmt.Errorf("json.Unmarshal: %w", err)
 	}
 	return result, nil
 }

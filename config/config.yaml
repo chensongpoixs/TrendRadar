@@ -9,6 +9,19 @@ server:
   port: 8080
   mode: "debug"
 
+# 结构化日志：zap + lumberjack 轮转；标准库 log 会重定向到同一套输出（redirect_std: true）
+logging:
+  enabled: true
+  level: "info"           # debug | info | warn | error
+  file: "logs/trendradar.log"  # 相对工作目录；与 config 同级的 logs 目录需可写
+  max_size_mb: 100
+  max_backups: 7
+  max_age_days: 30
+  compress: true          # 轮转旧文件 gzip
+  console: true             # 同时输出到 stderr
+  json_file: true           # 落盘 JSON 行（便于 ELK/Loki）；false 为类 console 文本
+  redirect_std: true        # 将 import "log" 打到 zap（含 scheduler/ai 等模块）
+
 scheduler:
   enabled: true
   # 可选: always_on(每天24次整点) daytime_8_23(每天8–23点整点) morning_evening office_hours night_owl
@@ -78,13 +91,23 @@ filter:
   interests: ""
 
 ai:
-  model: "gemma-4-26B-A4B-it-Q4_K_M"
-  api_base: "http://127.0.0.1:11434"
-  api_key: "not-needed"
-  timeout: 120
-  temperature: 1.0
-  max_tokens: 2000
-  num_retries: 10
+  #model: "gemma-4-26B-A4B-it-Q4_K_M"
+  model: "claude-sonnet-4-6" # 模型标识（格式: provider/model_name）
+  api_base: "http://127.0.0.1:11434" # 自定义 API 端点（可选，大多数情况留空）
+  #api_base: "https://key.simpleai.com.cn"
+  api_key: "ddd" # API Key（建议使用环境变量 AI_API_KEY）
+  timeout: 3000 # 请求超时时间（秒）
+  temperature: 1.0 # 采样温度 (0.0-2.0)
+  max_tokens: 102400 # 最大生成 token 数
+  num_retries: 10 # 失败重试次数
+
+# 兴趣标题过滤：分批 + 单批输入上限 + 可选输出 cap（详见 docs/ai-filter-batching.md）
+ai_filter:
+  batch_size: 18 # 每批最多条数（与 max_input_chars 取更紧的约束）
+  max_input_chars: 12000 # 单批 user 内容 rune 上限，含兴趣长文+标题列表+模板尾；0=只按条数
+  batch_interval: 3000 # 批次间间隔（毫秒），本机 Ollama 时略作喘息；0=不睡
+  max_output_tokens: 16384 # 本任务单请求 max_tokens，避免 JSON 被压满才截断、content 变空
+  min_score: 0.7
 
 ai_analysis:
   enabled: true

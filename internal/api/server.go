@@ -1,16 +1,23 @@
 package api
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"net/http"
+	"time"
 
+	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
 	"github.com/trendradar/backend-go/pkg/config"
+	"github.com/trendradar/backend-go/pkg/logger"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Server API 服务器
 type Server struct {
-	router *gin.Engine
+	router  *gin.Engine
+	httpSrv *http.Server
 }
 
 // NewServer 创建服务器实例
@@ -28,8 +35,23 @@ func NewServer() *Server {
 	}
 
 	router := gin.New()
-	router.Use(gin.Logger())
-	router.Use(gin.Recovery())
+	zl := logger.L()
+	router.Use(RequestIDMiddleware())
+	router.Use(ginzap.GinzapWithConfig(zl, &ginzap.Config{
+		TimeFormat:   time.RFC3339,
+		UTC:          false,
+		DefaultLevel: zapcore.InfoLevel,
+		SkipPaths:    []string{"/health"},
+		Context: func(c *gin.Context) []zapcore.Field {
+			if v, ok := c.Get(RequestIDContextKey); ok {
+				if s, ok2 := v.(string); ok2 && s != "" {
+					return []zapcore.Field{zap.String("request_id", s)}
+				}
+			}
+			return nil
+		},
+	}))
+	router.Use(ginzap.RecoveryWithZap(zl, true))
 
 	// TODO: 添加 CORS 中间件
 	// TODO: 添加认证中间件
@@ -96,13 +118,25 @@ func (s *Server) registerRoutes() {
 	s.router.POST("/mcp", MCPHandle)
 }
 
-// Start 启动服务器
+// Start 在 ListenAndServe 上阻塞，直至 Shutdown 或监听失败。勿与 gin.Run 混用。
 func (s *Server) Start() error {
 	cfg := config.Get()
 	addr := cfg.Server.Host + ":" + fmt.Sprintf("%d", cfg.Server.Port)
 
-	log.Printf("Server listening on %s", addr)
-	return s.router.Run(addr)
+	s.httpSrv = &http.Server{
+		Addr:    addr,
+		Handler: s.router,
+	}
+	logger.WithComponent("http").Info("server listening", zap.String("addr", addr))
+	return s.httpSrv.ListenAndServe()
+}
+
+// Shutdown 优雅停止 HTTP 服务，关闭监听器与空闲连接。ctx 可设总超时（如 20s）。
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.httpSrv == nil {
+		return nil
+	}
+	return s.httpSrv.Shutdown(ctx)
 }
 
 // healthCheck 健康检查

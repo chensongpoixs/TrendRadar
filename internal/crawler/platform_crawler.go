@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/trendradar/backend-go/pkg/config"
+	"github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
+	"go.uber.org/zap"
 )
 
 // PlatformCrawler 平台热榜爬虫
@@ -50,8 +51,8 @@ func NewPlatformCrawler() *PlatformCrawler {
 // FetchData 获取单个平台数据
 func (c *PlatformCrawler) FetchData(platformID string) ([]model.NewsItem, error) {
 	url := fmt.Sprintf("https://newsnow.busiyi.world/api/s?id=%s&latest", platformID)
-
-	log.Printf("Fetching platform: %s", platformID)
+	lg := logger.WithComponent("crawler")
+	lg.Debug("hotlist fetch start", zap.String("platform_id", platformID), zap.String("url", url))
 
 	var items []model.NewsItem
 	var lastError error
@@ -63,7 +64,8 @@ func (c *PlatformCrawler) FetchData(platformID string) ([]model.NewsItem, error)
 			break
 		}
 
-		log.Printf("Attempt %d failed for %s: %v", attempt, platformID, lastError)
+		lg.Warn("hotlist attempt failed",
+			zap.String("platform_id", platformID), zap.Int("attempt", attempt), zap.Error(lastError))
 
 		if attempt < 3 {
 			// 指数退避
@@ -127,7 +129,7 @@ func (c *PlatformCrawler) fetchWithRetry(url, platformID string) ([]model.NewsIt
 		})
 	}
 
-	log.Printf("Fetched %d items from %s", len(items), platformID)
+	logger.WithComponent("crawler").Info("hotlist fetch done", zap.String("platform_id", platformID), zap.Int("items", len(items)))
 	return items, nil
 }
 
@@ -159,7 +161,7 @@ func (c *PlatformCrawler) CrawlAll() (map[string][]model.NewsItem, map[string]st
 				mu.Lock()
 				failedIDs = append(failedIDs, platformID)
 				mu.Unlock()
-				log.Printf("Failed to crawl %s: %v", platformID, err)
+				logger.WithComponent("crawler").Error("crawl platform failed", zap.String("platform_id", platformID), zap.Error(err))
 				return
 			}
 

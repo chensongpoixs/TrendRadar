@@ -2,15 +2,16 @@ package core
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/trendradar/backend-go/pkg/config"
+	applog "github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
+	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 var DB *gorm.DB
@@ -40,7 +41,7 @@ func InitDatabase() error {
 
 	var err error
 	DB, err = gorm.Open(dialector, &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: gormlogger.Default.LogMode(gormlogger.Info),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect database: %w", err)
@@ -62,7 +63,7 @@ func InitDatabase() error {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
-	log.Println("Database connected successfully")
+	applog.WithComponent("db").Info("database ready", zap.String("driver", cfg.Driver), zap.String("database", cfg.Database))
 	return nil
 }
 

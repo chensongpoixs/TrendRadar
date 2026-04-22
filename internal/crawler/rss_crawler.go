@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/mmcdole/gofeed"
 	"github.com/trendradar/backend-go/pkg/config"
+	"github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
+	"go.uber.org/zap"
 )
 
 // RSSCrawler RSS 爬虫
@@ -59,7 +60,7 @@ func (c *RSSCrawler) FetchAll() (map[string][]model.RSSItem, map[string]string, 
 				mu.Lock()
 				failedIDs = append(failedIDs, feedID)
 				mu.Unlock()
-				log.Printf("Failed to fetch RSS %s: %v", feedID, err)
+				logger.WithComponent("crawler").Error("rss feed failed", zap.String("feed_id", feedID), zap.Error(err))
 				return
 			}
 
@@ -80,7 +81,8 @@ func (c *RSSCrawler) FetchAll() (map[string][]model.RSSItem, map[string]string, 
 
 // fetchFeed 抓取单个 RSS 源
 func (c *RSSCrawler) fetchFeed(url, feedID, feedName string, maxItems int) ([]model.RSSItem, error) {
-	log.Printf("Fetching RSS: %s (%s)", feedID, url)
+	lg := logger.WithComponent("crawler")
+	lg.Debug("rss fetch", zap.String("feed_id", feedID), zap.String("url", url))
 
 	// 发起 HTTP 请求
 	req, err := http.NewRequest("GET", url, nil)
@@ -141,6 +143,6 @@ func (c *RSSCrawler) fetchFeed(url, feedID, feedName string, maxItems int) ([]mo
 		count++
 	}
 
-	log.Printf("Fetched %d items from RSS %s", len(items), feedID)
+	lg.Info("rss fetch done", zap.String("feed_id", feedID), zap.Int("items", len(items)))
 	return items, nil
 }

@@ -3,7 +3,6 @@ package scheduler
 import (
 	"fmt"
 	"html"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +13,9 @@ import (
 	"github.com/trendradar/backend-go/internal/notification"
 	"github.com/trendradar/backend-go/internal/storage"
 	"github.com/trendradar/backend-go/pkg/config"
+	"github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
+	"go.uber.org/zap"
 )
 
 // Scheduler 调度器
@@ -43,7 +44,7 @@ func NewScheduler() *Scheduler {
 // Start 启动调度器
 func (s *Scheduler) Start() error {
 	if !s.enabled {
-		log.Println("Scheduler is disabled")
+		logger.WithComponent("scheduler").Info("scheduler disabled")
 		return nil
 	}
 
@@ -52,7 +53,7 @@ func (s *Scheduler) Start() error {
 
 	// 启动 cron
 	s.cron.Start()
-	log.Printf("Scheduler started with preset: %s", s.preset)
+	logger.WithComponent("scheduler").Info("scheduler started", zap.String("preset", s.preset))
 
 	return nil
 }
@@ -61,7 +62,7 @@ func (s *Scheduler) Start() error {
 func (s *Scheduler) Stop() {
 	if s.cron != nil {
 		s.cron.Stop()
-		log.Println("Scheduler stopped")
+		logger.WithComponent("scheduler").Info("scheduler stopped")
 	}
 }
 
@@ -69,7 +70,7 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) configureCronJobs() {
 	addJob := func(spec string) {
 		if _, err := s.cron.AddFunc(spec, s.runCrawlTask); err != nil {
-			log.Printf("Failed to add cron job (%s): %v", spec, err)
+			logger.WithComponent("scheduler").Error("add cron job failed", zap.String("spec", spec), zap.Error(err))
 		}
 	}
 
@@ -114,16 +115,16 @@ func (s *Scheduler) runCrawlTask() {
 	if lastRun, exists := s.lastRun[taskKey]; exists {
 		if now.Sub(lastRun) < time.Hour {
 			s.mutex.Unlock()
-			log.Println("Task skipped: ran recently")
+			logger.WithComponent("scheduler").Info("crawl task skipped, ran recently", zap.String("op", "runCrawlTask"))
 			return
 		}
 	}
 	s.lastRun[taskKey] = now
 	s.mutex.Unlock()
 
-	log.Println("Running scheduled crawl task...")
+	logger.WithComponent("scheduler").Info("running scheduled crawl", zap.String("op", "runCrawlTask"))
 	if err := runCrawlAnalyzeAndNotify(); err != nil {
-		log.Printf("Scheduled task failed: %v", err)
+		logger.WithComponent("scheduler").Error("scheduled task failed", zap.Error(err), zap.String("op", "runCrawlTask"))
 	}
 }
 
@@ -138,10 +139,12 @@ func (s *Scheduler) IsEnabled() bool {
 }
 
 func runCrawlAnalyzeAndNotify() error {
+	l := logger.WithComponent("scheduler")
 	cfg := config.Get()
 	if cfg == nil {
 		return fmt.Errorf("config not initialized")
 	}
+	l = l.With(zap.String("op", "crawl_and_notify"))
 
 	platformCrawler := crawler.NewPlatformCrawler()
 	results, idToName, failedIDs, err := platformCrawler.CrawlAll()
@@ -155,7 +158,7 @@ func runCrawlAnalyzeAndNotify() error {
 	crawlTime := time.Now()
 	for platformID, items := range results {
 		if err := newsStorage.SaveNewsData(platformID, items, crawlTime); err != nil {
-			log.Printf("Failed to save scheduled platform data for %s: %v", platformID, err)
+			l.Error("save hotlist platform failed", zap.String("platform_id", platformID), zap.Error(err))
 		}
 	}
 
@@ -165,16 +168,16 @@ func runCrawlAnalyzeAndNotify() error {
 		rssCrawler := crawler.NewRSSCrawler()
 		rssResults, _, rssFailedIDs, rssErr := rssCrawler.FetchAll()
 		if rssErr != nil {
-			log.Printf("Scheduled RSS crawl failed: %v", rssErr)
+			l.Error("rss crawl failed", zap.Error(rssErr))
 		} else {
 			for feedID, items := range rssResults {
 				if err := newsStorage.SaveRSSData(feedID, items, crawlTime); err != nil {
-					log.Printf("Failed to save scheduled RSS data for %s: %v", feedID, err)
+					l.Error("save rss feed failed", zap.String("feed_id", feedID), zap.Error(err))
 				}
 				rssTotal += len(items)
 			}
 			if len(rssFailedIDs) > 0 {
-				log.Printf("Scheduled RSS failed ids: %v", rssFailedIDs)
+				l.Warn("rss fetch partial failures", zap.Strings("failed_feed_ids", rssFailedIDs))
 			}
 		}
 	}
@@ -188,7 +191,7 @@ func runCrawlAnalyzeAndNotify() error {
 
 	emailResults, emailSkipped, dedupErr := storage.FilterNotYetEmailed(results)
 	if dedupErr != nil {
-		log.Printf("Email dedup query failed, sending without filter: %v", dedupErr)
+		l.Warn("email dedup query failed, sending without filter", zap.Error(dedupErr))
 		emailResults, emailSkipped = results, 0
 	}
 	mailCount := 0
@@ -216,30 +219,33 @@ func runCrawlAnalyzeAndNotify() error {
 	report := formatEmailHTML(emailResults, idToName, crawlTime, mailCount, rssTotal, failedIDs, filterMode, emailSkipped)
 
 	if !cfg.Notification.Enabled {
-		log.Printf("Notification disabled, skip sending email. Local data saved successfully.")
+		l.Info("notification disabled, skip email", zap.Bool("data_saved", true))
 		return nil
 	}
 	if strings.TrimSpace(cfg.Notification.Channels.Email.To) == "" {
-		log.Printf("Email recipient is empty, skip sending email. Local data saved successfully.")
+		l.Info("email recipient empty, skip email", zap.Bool("data_saved", true))
 		return nil
 	}
 	if mailCount == 0 {
-		log.Printf("Email skipped: no new items after dedup (after AI: %d, excluded as already emailed: %d)", afterAICount, emailSkipped)
+		l.Info("email skipped no new after dedup",
+			zap.Int("after_ai_count", afterAICount), zap.Int("dedup_excluded", emailSkipped))
 		return nil
 	}
 	dispatcher := notification.NewDispatcher()
 	sendResult := dispatcher.Send("趋势雷达 每小时关注标题汇总", report)
 	if ok, exists := sendResult["email"]; !exists || !ok {
-		log.Printf("Email html send failed, fallback to plain report")
+		l.Warn("email html send failed, retry plain text", zap.String("to", cfg.Notification.Channels.Email.To))
 		sendResult = dispatcher.Send("趋势雷达 每小时关注标题汇总", plainReport)
 	}
 	if ok, exists := sendResult["email"]; !exists || !ok {
 		return fmt.Errorf("email send failed: %v", sendResult)
 	}
 	if err := storage.RecordEmailSent(emailResults); err != nil {
-		log.Printf("Record email fingerprints failed: %v", err)
+		l.Error("record email fingerprints failed", zap.Error(err))
 	}
-	log.Printf("Scheduled email sent successfully to %s (new: %d, dedup excluded: %d)", cfg.Notification.Channels.Email.To, mailCount, emailSkipped)
+	l.Info("scheduled email sent",
+		zap.String("to", cfg.Notification.Channels.Email.To),
+		zap.Int("new_count", mailCount), zap.Int("dedup_excluded", emailSkipped))
 	return nil
 }
 

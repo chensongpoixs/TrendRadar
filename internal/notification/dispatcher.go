@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -14,6 +13,8 @@ import (
 	"time"
 
 	"github.com/trendradar/backend-go/pkg/config"
+	applog "github.com/trendradar/backend-go/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // Dispatcher 通知调度器
@@ -226,14 +227,14 @@ func sendWebhook(url string, data map[string]interface{}) bool {
 	// 序列化数据
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		log.Printf("Failed to marshal webhook data: %v", err)
+		applog.WithComponent("notify").Error("webhook marshal failed", zap.Error(err))
 		return false
 	}
 
 	// 创建 HTTP 请求
 	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonData))
 	if err != nil {
-		log.Printf("Failed to create webhook request: %v", err)
+		applog.WithComponent("notify").Error("webhook new request failed", zap.Error(err))
 		return false
 	}
 
@@ -243,18 +244,18 @@ func sendWebhook(url string, data map[string]interface{}) bool {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Failed to send webhook to %s: %v", url, err)
+		applog.WithComponent("notify").Error("webhook post failed", zap.String("url", url), zap.Error(err))
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Printf("Webhook sent successfully to %s (status: %d)", url, resp.StatusCode)
+		applog.WithComponent("notify").Info("webhook ok", zap.String("url", url), zap.Int("status", resp.StatusCode))
 		return true
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	log.Printf("Webhook failed to %s (status: %d): %s", url, resp.StatusCode, string(body))
+	applog.WithComponent("notify").Warn("webhook non-2xx", zap.String("url", url), zap.Int("status", resp.StatusCode), zap.String("body", string(body)))
 	return false
 }
 
@@ -265,7 +266,7 @@ func (d *Dispatcher) sendToEmail(title, message string) bool {
 	// 解析收件人
 	toEmail := strings.TrimSpace(cfg.To)
 	if toEmail == "" {
-		log.Printf("Email recipient is empty")
+		applog.WithComponent("notify").Warn("email to empty")
 		return false
 	}
 
@@ -291,7 +292,7 @@ func (d *Dispatcher) sendToEmail(title, message string) bool {
 		}
 	}
 	if len(recipients) == 0 {
-		log.Printf("No valid email recipients")
+		applog.WithComponent("notify").Warn("email no valid recipients")
 		return false
 	}
 
@@ -319,11 +320,11 @@ func (d *Dispatcher) sendToEmail(title, message string) bool {
 		sendErr = sendMailStartTLS(smtpServer, smtpPort, from, recipients, auth, buf.Bytes())
 	}
 	if sendErr != nil {
-		log.Printf("Failed to send email: %v", sendErr)
+		applog.WithComponent("notify").Error("smtp send failed", zap.Error(sendErr), zap.String("to", toEmail))
 		return false
 	}
 
-	log.Printf("Email sent successfully to %s", toEmail)
+	applog.WithComponent("notify").Info("email sent", zap.String("to", toEmail))
 	return true
 }
 

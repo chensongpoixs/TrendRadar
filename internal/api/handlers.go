@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"github.com/trendradar/backend-go/internal/storage"
 	"github.com/trendradar/backend-go/pkg/config"
 	"github.com/trendradar/backend-go/pkg/model"
+	applog "github.com/trendradar/backend-go/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // GetLatestNews 获取最新新闻
@@ -49,7 +50,7 @@ func GetLatestNews(c *gin.Context) {
 
 	for platformID, items := range results {
 		if err := newsStorage.SaveNewsData(platformID, items, crawlTime); err != nil {
-			log.Printf("Failed to save data for %s: %v", platformID, err)
+			applog.WithComponent("api").Error("save news failed", zap.String("platform_id", platformID), zap.Error(err))
 		}
 	}
 
@@ -275,7 +276,7 @@ func GetLatestRSS(c *gin.Context) {
 
 	for feedID, items := range results {
 		if err := newsStorage.SaveRSSData(feedID, items, crawlTime); err != nil {
-			log.Printf("Failed to save RSS data for %s: %v", feedID, err)
+			applog.WithComponent("api").Error("save rss failed", zap.String("feed_id", feedID), zap.Error(err))
 		}
 	}
 
