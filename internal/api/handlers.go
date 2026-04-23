@@ -1,14 +1,15 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/trendradar/backend-go/internal/ai"
-	"github.com/trendradar/backend-go/internal/crawler"
 	"github.com/trendradar/backend-go/internal/storage"
 	"github.com/trendradar/backend-go/pkg/config"
 	"github.com/trendradar/backend-go/pkg/model"
@@ -16,22 +17,42 @@ import (
 	"go.uber.org/zap"
 )
 
-// GetLatestNews 获取最新新闻
+var dateYMD = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+func parseYMD(s string) (time.Time, bool) {
+	if !dateYMD.MatchString(s) {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// GetLatestNews 仅从本地库返回定时任务已写入的热榜快照，不访问外网 news 源
 func GetLatestNews(c *gin.Context) {
 	platformsParam := c.QueryArray("platforms")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	includeURL, _ := strconv.ParseBool(c.DefaultQuery("include_url", "false"))
-	useAIFilter, _ := strconv.ParseBool(c.DefaultQuery("use_ai_filter", "false"))
-	_ = platformsParam
-	_ = limit
-	_ = includeURL
+	_ = c.DefaultQuery("include_url", "false")
+	_ = c.DefaultQuery("use_ai_filter", "false")
 
-	// 创建爬虫实例
-	platformCrawler := crawler.NewPlatformCrawler()
+	cfg := config.Get()
+	var platformIDs []string
+	if len(platformsParam) > 0 {
+		platformIDs = platformsParam
+	} else {
+		for _, src := range cfg.Platforms.Sources {
+			if src.Enabled {
+				platformIDs = append(platformIDs, src.ID)
+			}
+		}
+	}
 
-	// 抓取数据
-	results, idToName, failedIDs, err := platformCrawler.CrawlAll()
+	newsStorage := storage.NewNewsStorage()
+	results, lastCrawl, err := newsStorage.GetLatestNews(platformIDs, limit)
 	if err != nil {
+		applog.WithComponent("api").Error("read latest news from database failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   err.Error(),
@@ -39,36 +60,30 @@ func GetLatestNews(c *gin.Context) {
 		return
 	}
 
-	// 可选 AI 兴趣筛选：默认关闭，避免接口耗时导致前端超时
-	if useAIFilter {
-		results = ai.ApplyFocusFilter(results)
-	}
-
-	// 保存到数据库
-	newsStorage := storage.NewNewsStorage()
-	crawlTime := time.Now()
-
-	for platformID, items := range results {
-		if err := newsStorage.SaveNewsData(platformID, items, crawlTime); err != nil {
-			applog.WithComponent("api").Error("save news failed", zap.String("platform_id", platformID), zap.Error(err))
+	idToName := make(map[string]string)
+	for _, src := range cfg.Platforms.Sources {
+		if src.ID != "" {
+			idToName[src.ID] = src.Name
 		}
 	}
 
-	// 按需求关闭内容 AI 分析：仅保留标题 AI 过滤
-	aiSummary := gin.H{
-		"enabled": false,
-		"reason":  "content_ai_analysis_disabled",
+	crawlTimeStr := ""
+	if !lastCrawl.IsZero() {
+		crawlTimeStr = lastCrawl.Format(time.RFC3339)
 	}
 
-	// 返回结果
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
 			"news":       results,
 			"id_to_name": idToName,
-			"failed_ids": failedIDs,
-			"crawl_time": crawlTime.Format(time.RFC3339),
-			"ai_analysis": aiSummary,
+			"failed_ids": []string{},
+			"crawl_time": crawlTimeStr,
+			"source":     "database",
+			"ai_analysis": gin.H{
+				"enabled": false,
+				"reason":  "read_only_from_database",
+			},
 		},
 	})
 }
@@ -113,11 +128,143 @@ func buildAINewsSummary(results map[string][]model.NewsItem, idToName map[string
 	}, nil
 }
 
+// GetSnapshotAvailableDates 有热榜快照的日期列表（新→旧）
+func GetSnapshotAvailableDates(c *gin.Context) {
+	days, _ := strconv.Atoi(c.DefaultQuery("days", "60"))
+	if days < 1 {
+		days = 1
+	}
+	if days > 365 {
+		days = 365
+	}
+	newsStorage := storage.NewNewsStorage()
+	dates, err := newsStorage.GetSnapshotAvailableDates(days)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"dates":    dates,
+			"timezone": config.Get().App.Timezone,
+		},
+	})
+}
+
+// GetSnapshotDaySummary 某一天各小时行数等汇总
+func GetSnapshotDaySummary(c *gin.Context) {
+	date := c.Param("date")
+	if _, ok := parseYMD(date); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "invalid date, expected YYYY-MM-DD",
+		})
+		return
+	}
+	newsStorage := storage.NewNewsStorage()
+	hours, total, err := newsStorage.GetSnapshotDaySummary(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	cfg := config.Get()
+	idToName := make(map[string]string)
+	for _, src := range cfg.Platforms.Sources {
+		if src.ID != "" {
+			idToName[src.ID] = src.Name
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"date":       date,
+			"timezone":   cfg.App.Timezone,
+			"total_rows": total,
+			"hours":      hours,
+			"id_to_name": idToName,
+		},
+	})
+}
+
+// GetSnapshotHour 某一天某一小时热榜（同一 URL 多次抓取取最晚一条）
+func GetSnapshotHour(c *gin.Context) {
+	date := c.Param("date")
+	if _, ok := parseYMD(date); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "invalid date, expected YYYY-MM-DD",
+		})
+		return
+	}
+	hour, err := strconv.Atoi(c.Param("hour"))
+	if err != nil || hour < 0 || hour > 23 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "hour must be 0-23",
+		})
+		return
+	}
+	platforms := c.QueryArray("platforms")
+	newsStorage := storage.NewNewsStorage()
+	items, err := newsStorage.GetSnapshotForHour(date, hour, platforms)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	cfg := config.Get()
+	idToName := make(map[string]string)
+	for _, src := range cfg.Platforms.Sources {
+		if src.ID != "" {
+			idToName[src.ID] = src.Name
+		}
+	}
+	// 填充展示名
+	for i := range items {
+		if items[i].SourceName == "" {
+			if n, ok := idToName[items[i].SourceID]; ok {
+				items[i].SourceName = n
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"date":       date,
+			"hour":       hour,
+			"timezone":   cfg.App.Timezone,
+			"items":      items,
+			"id_to_name": idToName,
+		},
+	})
+}
+
 // GetNewsByDate 按日期获取新闻
 func GetNewsByDate(c *gin.Context) {
 	date := c.Param("date")
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
+	}
+	// 避免与固定路径冲突时误匹配为日期（如误请求 /search 会走到此处则会被过滤）
+	if date == "search" {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "error": "not found"})
+		return
+	}
+	if !dateYMD.MatchString(date) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("invalid date, expected YYYY-MM-DD, got %q", date),
+		})
+		return
 	}
 
 	platformsParam := c.QueryArray("platforms")
@@ -248,21 +395,28 @@ func GetTrendingTopics(c *gin.Context) {
 	})
 }
 
-// GetLatestRSS 获取最新 RSS
+// GetLatestRSS 仅从本地库返回定时任务已写入的 RSS 快照，不拉取外网 feed
 func GetLatestRSS(c *gin.Context) {
 	feedsParam := c.QueryArray("feeds")
-	days, _ := strconv.Atoi(c.DefaultQuery("days", "1"))
+	_ = c.DefaultQuery("days", "1")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	_ = feedsParam
-	_ = days
-	_ = limit
 
-	// 创建 RSS 爬虫
-	rssCrawler := crawler.NewRSSCrawler()
+	cfg := config.Get()
+	var feedIDs []string
+	if len(feedsParam) > 0 {
+		feedIDs = feedsParam
+	} else {
+		for _, f := range cfg.RSS.Feeds {
+			if f.Enabled {
+				feedIDs = append(feedIDs, f.ID)
+			}
+		}
+	}
 
-	// 抓取数据
-	results, idToName, failedIDs, err := rssCrawler.FetchAll()
+	newsStorage := storage.NewNewsStorage()
+	results, lastCrawl, err := newsStorage.GetLatestRSSFromDB(feedIDs, limit)
 	if err != nil {
+		applog.WithComponent("api").Error("read latest rss from database failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error":   err.Error(),
@@ -270,23 +424,26 @@ func GetLatestRSS(c *gin.Context) {
 		return
 	}
 
-	// 保存到数据库
-	newsStorage := storage.NewNewsStorage()
-	crawlTime := time.Now()
-
-	for feedID, items := range results {
-		if err := newsStorage.SaveRSSData(feedID, items, crawlTime); err != nil {
-			applog.WithComponent("api").Error("save rss failed", zap.String("feed_id", feedID), zap.Error(err))
+	idToName := make(map[string]string)
+	for _, f := range cfg.RSS.Feeds {
+		if f.ID != "" {
+			idToName[f.ID] = f.Name
 		}
+	}
+
+	crawlTimeStr := ""
+	if !lastCrawl.IsZero() {
+		crawlTimeStr = lastCrawl.Format(time.RFC3339)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"rss":      results,
+			"rss":        results,
 			"id_to_name": idToName,
-			"failed_ids": failedIDs,
-			"crawl_time": crawlTime.Format(time.RFC3339),
+			"failed_ids": []string{},
+			"crawl_time": crawlTimeStr,
+			"source":     "database",
 		},
 	})
 }
@@ -990,39 +1147,11 @@ func GetCurrentConfig(c *gin.Context) {
 	})
 }
 
-// TriggerCrawl 触发抓取任务
+// TriggerCrawl 不再通过 HTTP 触发外网拉取；热榜与 RSS 由 scheduler 在整点/配置周期内写入数据库。
 func TriggerCrawl(c *gin.Context) {
-	var input struct {
-		Platforms   []string `json:"platforms"`
-		SaveToLocal bool     `json:"save_to_local"`
-	}
-
-	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"error":   err.Error(),
-		})
-		return
-	}
-
-	// 触发抓取
-	platformCrawler := crawler.NewPlatformCrawler()
-	results, idToName, failedIDs, err := platformCrawler.CrawlAll()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error":   err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data": gin.H{
-			"news":      results,
-			"id_to_name": idToName,
-			"failed_ids": failedIDs,
-		},
+	c.JSON(http.StatusForbidden, gin.H{
+		"success": false,
+		"error":   "crawl 仅由服务端定时任务执行，已禁用 HTTP 触发外网拉取；请通过 GET /api/v1/news/latest 等接口读取库内数据",
 	})
 }
 

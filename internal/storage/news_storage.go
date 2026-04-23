@@ -1,12 +1,16 @@
 package storage
 
 import (
+	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/trendradar/backend-go/internal/core"
+	"github.com/trendradar/backend-go/pkg/config"
 	"github.com/trendradar/backend-go/pkg/model"
+	"gorm.io/gorm"
 )
 
 // NewsStorage 新闻存储层
@@ -15,6 +19,45 @@ type NewsStorage struct{}
 // NewNewsStorage 创建新闻存储实例
 func NewNewsStorage() *NewsStorage {
 	return &NewsStorage{}
+}
+
+// PartitionCrawlByPersistedItems 将本批热榜按是否已在 news_items 中存在（同 source_id + NormalizeURL(url)）拆开：
+//   - forAI：尚未落库，需送 LLM 做兴趣过滤；
+//   - skipPersisted：本批中已在库中的链接，本小时不再送 AI，原样与过滤结果合并。
+// 与 SaveNewsData 内使用的 NormalizeURL 一致。
+func (s *NewsStorage) PartitionCrawlByPersistedItems(crawl map[string][]model.NewsItem) (forAI, skipPersisted map[string][]model.NewsItem, nForAI, nSkip int, err error) {
+	forAI = make(map[string][]model.NewsItem)
+	skipPersisted = make(map[string][]model.NewsItem)
+	db := core.GetDB()
+	for platformID, items := range crawl {
+		if len(items) == 0 {
+			continue
+		}
+		var urlRows []string
+		if perr := db.Model(&model.NewsItem{}).Where("source_id = ?", platformID).Pluck("url", &urlRows).Error; perr != nil {
+			return nil, nil, 0, 0, perr
+		}
+		exist := make(map[string]struct{}, len(urlRows))
+		for _, u := range urlRows {
+			exist[NormalizeURL(u)] = struct{}{}
+		}
+		for _, it := range items {
+			u := strings.TrimSpace(it.URL)
+			if u == "" {
+				forAI[platformID] = append(forAI[platformID], it)
+				nForAI++
+				continue
+			}
+			if _, ok := exist[NormalizeURL(u)]; ok {
+				skipPersisted[platformID] = append(skipPersisted[platformID], it)
+				nSkip++
+			} else {
+				forAI[platformID] = append(forAI[platformID], it)
+				nForAI++
+			}
+		}
+	}
+	return
 }
 
 // SaveNewsData 保存新闻数据
@@ -86,6 +129,10 @@ func (s *NewsStorage) SaveNewsData(platformID string, items []model.NewsItem, cr
 		})
 	}
 
+	if err := s.appendHotlistSnapshots(platformID, items, crawlTime); err != nil {
+		return err
+	}
+	s.pruneOldHotlistSnapshots()
 	return nil
 }
 
@@ -130,20 +177,67 @@ func (s *NewsStorage) GetTodayNews(platformIDs []string, date string) (map[strin
 	return results, nil
 }
 
-// GetLatestNews 获取最新一批新闻
-func (s *NewsStorage) GetLatestNews(platformIDs []string) (map[string][]model.NewsItem, error) {
+// GetLatestNews 从库中读取各平台「最近一次整批定时任务」写入的同 crawl_time 快照，按 rank 升序。不访问外网。
+// limit 为每平台条数上限；返回各平台中较晚的 lastCrawl 作为整次展示的参考时间。
+func (s *NewsStorage) GetLatestNews(platformIDs []string, limit int) (map[string][]model.NewsItem, time.Time, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
 	db := core.GetDB()
 	results := make(map[string][]model.NewsItem)
-
+	var lastCrawl time.Time
 	for _, platformID := range platformIDs {
+		var probe model.NewsItem
+		err := db.Where("source_id = ?", platformID).Order("crawl_time DESC").First(&probe).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				results[platformID] = []model.NewsItem{}
+				continue
+			}
+			return nil, time.Time{}, err
+		}
+		ct := probe.CrawlTime
 		var items []model.NewsItem
-		if err := db.Where("source_id = ?", platformID).Order("crawl_time DESC").Limit(100).Find(&items).Error; err != nil {
-			return nil, err
+		if err := db.Where("source_id = ? AND crawl_time = ?", platformID, ct).Order("rank ASC").Limit(limit).Find(&items).Error; err != nil {
+			return nil, time.Time{}, err
 		}
 		results[platformID] = items
+		if ct.After(lastCrawl) {
+			lastCrawl = ct
+		}
 	}
+	return results, lastCrawl, nil
+}
 
-	return results, nil
+// GetLatestRSSFromDB 从库中读取各源最近一次整批抓取的同 crawl_time 条目。不访问外网。
+func (s *NewsStorage) GetLatestRSSFromDB(feedIDs []string, limit int) (map[string][]model.RSSItem, time.Time, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	db := core.GetDB()
+	out := make(map[string][]model.RSSItem)
+	var lastCrawl time.Time
+	for _, feedID := range feedIDs {
+		var probe model.RSSItem
+		err := db.Where("feed_id = ?", feedID).Order("crawl_time DESC").First(&probe).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				out[feedID] = []model.RSSItem{}
+				continue
+			}
+			return nil, time.Time{}, err
+		}
+		ct := probe.CrawlTime
+		var items []model.RSSItem
+		if err := db.Where("feed_id = ? AND crawl_time = ?", feedID, ct).Order("crawl_time DESC, id DESC").Limit(limit).Find(&items).Error; err != nil {
+			return nil, time.Time{}, err
+		}
+		out[feedID] = items
+		if ct.After(lastCrawl) {
+			lastCrawl = ct
+		}
+	}
+	return out, lastCrawl, nil
 }
 
 // GetTrendingTopics 获取热门话题
@@ -320,4 +414,170 @@ func (s *NewsStorage) GetTopicStats(topN int, mode string) ([]model.Topic, error
 	}
 
 	return topics, nil
+}
+
+func appTimeLocation() *time.Location {
+	tz := config.Get().App.Timezone
+	if tz == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
+// appendHotlistSnapshots 将本批热榜按应用时区写入日/小时桶（追加型快照）
+func (s *NewsStorage) appendHotlistSnapshots(platformID string, items []model.NewsItem, crawlTime time.Time) error {
+	if len(items) == 0 {
+		return nil
+	}
+	loc := appTimeLocation()
+	t := crawlTime.In(loc)
+	dateStr := t.Format("2006-01-02")
+	hour := t.Hour()
+
+	db := core.GetDB()
+	rows := make([]model.HotlistSnapshot, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, model.HotlistSnapshot{
+			DateLocal:  dateStr,
+			HourLocal:  hour,
+			SourceID:   platformID,
+			SourceName: it.SourceName,
+			Title:      it.Title,
+			URL:        it.URL,
+			MobileURL:  it.MobileURL,
+			Rank:       it.Rank,
+			CapturedAt: crawlTime,
+		})
+	}
+	return db.CreateInBatches(rows, 200).Error
+}
+
+func (s *NewsStorage) pruneOldHotlistSnapshots() {
+	retention := config.Get().Storage.Local.RetentionDays
+	if retention <= 0 {
+		retention = 30
+	}
+	loc := appTimeLocation()
+	cut := time.Now().In(loc).AddDate(0, 0, -retention)
+	cutoff := cut.Format("2006-01-02")
+	_ = core.GetDB().Where("date_local < ?", cutoff).Delete(&model.HotlistSnapshot{}).Error
+}
+
+// SnapshotDateInfo 有快照数据的自然日
+type SnapshotDateInfo struct {
+	Date     string `json:"date"`
+	RowCount int64  `json:"row_count"`
+}
+
+// GetSnapshotAvailableDates 返回有热榜快照的日期（新→旧），按应用时区下的 date_local
+func (s *NewsStorage) GetSnapshotAvailableDates(days int) ([]SnapshotDateInfo, error) {
+	if days <= 0 || days > 365 {
+		days = 60
+	}
+	db := core.GetDB()
+	var rows []struct {
+		DateLocal string
+		RowCount  int64
+	}
+	err := db.Model(&model.HotlistSnapshot{}).
+		Select("date_local AS date_local, COUNT(*) AS row_count").
+		Group("date_local").
+		Order("date_local DESC").
+		Limit(days).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SnapshotDateInfo, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, SnapshotDateInfo{Date: r.DateLocal, RowCount: r.RowCount})
+	}
+	return out, nil
+}
+
+// SnapshotHourStat 某天内某小时统计
+type SnapshotHourStat struct {
+	Hour          int    `json:"hour"`
+	RowCount      int64  `json:"row_count"`
+	FirstCaptured string `json:"first_captured"`
+	LastCaptured  string `json:"last_captured"`
+}
+
+// GetSnapshotDaySummary 按日汇总：各小时行数与首尾抓取时间
+func (s *NewsStorage) GetSnapshotDaySummary(dateLocal string) ([]SnapshotHourStat, int64, error) {
+	db := core.GetDB()
+	type agg struct {
+		Hour          int       `gorm:"column:hour"`
+		RowCount      int64     `gorm:"column:row_count"`
+		FirstCaptured time.Time `gorm:"column:first_captured"`
+		LastCaptured  time.Time `gorm:"column:last_captured"`
+	}
+	var aggs []agg
+	err := db.Model(&model.HotlistSnapshot{}).
+		Select("hour_local AS hour, COUNT(*) AS row_count, MIN(captured_at) AS first_captured, MAX(captured_at) AS last_captured").
+		Where("date_local = ?", dateLocal).
+		Group("hour_local").
+		Order("hour_local ASC").
+		Scan(&aggs).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	var total int64
+	for _, a := range aggs {
+		total += a.RowCount
+	}
+	out := make([]SnapshotHourStat, 0, len(aggs))
+	for _, a := range aggs {
+		out = append(out, SnapshotHourStat{
+			Hour:          a.Hour,
+			RowCount:      a.RowCount,
+			FirstCaptured: a.FirstCaptured.UTC().Format(time.RFC3339),
+			LastCaptured:  a.LastCaptured.UTC().Format(time.RFC3339),
+		})
+	}
+	return out, total, nil
+}
+
+// GetSnapshotForHour 返回某小时全部快照，按同一 source+url 仅保留「最晚一次抓取」
+func (s *NewsStorage) GetSnapshotForHour(dateLocal string, hour int, platformIDs []string) ([]model.HotlistSnapshot, error) {
+	if hour < 0 || hour > 23 {
+		return nil, errors.New("invalid hour")
+	}
+	db := core.GetDB()
+	q := db.Where("date_local = ? AND hour_local = ?", dateLocal, hour)
+	if len(platformIDs) > 0 {
+		q = q.Where("source_id IN ?", platformIDs)
+	}
+	var raw []model.HotlistSnapshot
+	if err := q.Order("captured_at DESC, rank ASC, title ASC").Find(&raw).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	deduped := make([]model.HotlistSnapshot, 0, len(raw))
+	for _, r := range raw {
+		key := r.SourceID + "\x00" + NormalizeURL(r.URL)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, r)
+	}
+	sort.Slice(deduped, func(i, j int) bool {
+		ri, rj := deduped[i].Rank, deduped[j].Rank
+		if ri != rj {
+			if ri == 0 {
+				return false
+			}
+			if rj == 0 {
+				return true
+			}
+			return ri < rj
+		}
+		return deduped[i].Title < deduped[j].Title
+	})
+	return deduped, nil
 }

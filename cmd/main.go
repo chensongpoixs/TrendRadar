@@ -2,96 +2,92 @@ package main
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
-	"github.com/joho/godotenv"
-	"github.com/trendradar/backend-go/internal/api"
-	"github.com/trendradar/backend-go/internal/core"
-	"github.com/trendradar/backend-go/internal/scheduler"
-	"github.com/trendradar/backend-go/pkg/config"
-	"github.com/trendradar/backend-go/pkg/logger"
-	"go.uber.org/zap"
+	"github.com/kardianos/service"
 )
 
-func main() {
-	// 加载环境变量
-	if err := godotenv.Load(".env"); err != nil {
-		log.Println("No .env file found, using environment variables")
-	}
+// program 实现 kardianos/service.Interface，用于 Windows 服务 / Linux systemd 等同套生命周期。
+type program struct {
+	cancel  context.CancelFunc
+	runDone chan struct{}
+}
 
-	// 加载配置
-	configPath := os.Getenv("CONFIG_PATH")
-	if configPath == "" {
-		configPath = "./config/config.yaml"
-	}
-	if err := config.Init(configPath); err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-	cfg := config.Get()
-	if err := logger.Init(cfg.Logging, &logger.LogMeta{
-		Service:     cfg.App.Name,
-		Version:     cfg.App.Version,
-		Environment: cfg.App.Environment,
-	}); err != nil {
-		log.Fatalf("Failed to init logger: %v", err)
-	}
-	defer logger.Sync()
-
-	logger.L().Info("config loaded", zap.String("path", configPath))
-	logger.L().Info("starting", zap.String("app", cfg.App.Name), zap.String("env", cfg.App.Environment))
-
-	if err := core.InitDatabase(); err != nil {
-		logger.L().Fatal("failed to initialize database", zap.Error(err))
-	}
-
-	// 初始化 API 服务器
-	server := api.NewServer()
-	jobScheduler := scheduler.NewScheduler()
-	if err := jobScheduler.Start(); err != nil {
-		logger.L().Error("scheduler start failed", zap.Error(err))
-	}
-	// 服务启动后立即执行一次：抓取 + AI 过滤分析 + 本地保存 + 邮件推送
-	if jobScheduler.IsEnabled() {
-		go jobScheduler.RunNow()
-	}
-
-	errCh := make(chan error, 1)
+func (p *program) Start(s service.Service) error {
+	p.runDone = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
 	go func() {
-		errCh <- server.Start()
+		defer close(p.runDone)
+		if err := runApp(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "trendradar runApp: %v\n", err)
+			os.Exit(1)
+		}
 	}()
+	return nil
+}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	port := cfg.Server.Port
-	logger.L().Info("http server starting", zap.Int("port", port))
-
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.L().Fatal("http server stopped with error", zap.Error(err))
+func (p *program) Stop(s service.Service) error {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	if p.runDone != nil {
+		select {
+		case <-p.runDone:
+		case <-time.After(25 * time.Second):
 		}
-		jobScheduler.Stop()
-	case sig := <-sigCh:
-		signal.Stop(sigCh)
-		logger.L().Info("shutdown signal received", zap.String("signal", sig.String()))
-		jobScheduler.Stop()
+	}
+	return nil
+}
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.L().Warn("graceful shutdown finished with error", zap.Error(err))
-		} else {
-			logger.L().Info("http server shut down gracefully")
+func buildServiceConfig(exeDir string) *service.Config {
+	return &service.Config{
+		Name:        "TrendRadar",
+		DisplayName: "TrendRadar 趋势雷达",
+		Description: "热点与 RSS 抓取、AI 过滤、HTTP API（backend-go）",
+		// Linux systemd：工作目录；Windows 不生效，已依赖 chdirToExecutable
+		WorkingDirectory: exeDir,
+	}
+}
+
+func main() {
+	exeDir, err := chdirToExecutable()
+	if err != nil {
+		log.Fatalf("chdir to executable: %v", err)
+	}
+
+	// 子命令：服务安装/卸载/启停（与 sc 对应能力；Windows 建议管理员执行 install）
+	if len(os.Args) > 1 {
+		if os.Args[1] == "help" || os.Args[1] == "-h" || os.Args[1] == "--help" {
+			fmt.Fprintln(os.Stdout, `用法:
+  trendradar              以前台方式运行（开发/调试用）
+  trendradar install      向系统注册为服务（需管理员 / root）
+  trendradar uninstall    从系统移除服务
+  trendradar start|stop|restart  通过服务管理器启停
+详见 docs/service-windows-linux.md`)
+			return
 		}
-		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.L().Error("http server exit", zap.Error(err))
+	}
+
+	prg := &program{}
+	svc, err := service.New(prg, buildServiceConfig(exeDir))
+	if err != nil {
+		log.Fatalf("service: %v", err)
+	}
+
+	if len(os.Args) > 1 {
+		a := os.Args[1]
+		if err := service.Control(svc, a); err != nil {
+			log.Fatalf("service %s: %v", a, err)
 		}
+		return
+	}
+
+	// 前台：与 kardianos 统一走 Run（控制台 Ctrl+C 会调 Stop）
+	if err = svc.Run(); err != nil {
+		log.Fatalf("Run: %v", err)
 	}
 }

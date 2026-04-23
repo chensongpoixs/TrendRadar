@@ -9,11 +9,25 @@ import (
 	"go.uber.org/zap"
 )
 
-// ApplyFocusFilter 按 AI 兴趣描述过滤热榜条目，返回命中的子集。
-// 若 AI 过滤未启用或调用失败，原样返回 results。
-func ApplyFocusFilter(results map[string][]model.NewsItem) map[string][]model.NewsItem {
+// FocusFilterEnforced 全局是否启用「AI 兴趣过滤」（与调度器、邮件同一口径）。
+// 为 true 时，任一条抓取路径不应再依赖单独 query 才过滤，且同一请求内只应调用 ApplyFocusFilter 一次。
+func FocusFilterEnforced() bool {
 	cfg := config.Get()
-	if cfg == nil || strings.ToLower(cfg.Filter.Method) != "ai" || strings.TrimSpace(cfg.Filter.Interests) == "" {
+	if cfg == nil {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(cfg.Filter.Method)) == "ai" &&
+		strings.TrimSpace(cfg.Filter.Interests) != ""
+}
+
+// ApplyFocusFilter 按 AI 兴趣描述过滤热榜条目，返回命中的子集。
+// 若 AI 过滤未启用（FocusFilterEnforced 为 false）或调用失败，原样返回 results。
+func ApplyFocusFilter(results map[string][]model.NewsItem) map[string][]model.NewsItem {
+	if !FocusFilterEnforced() {
+		return results
+	}
+	cfg := config.Get()
+	if cfg == nil {
 		return results
 	}
 

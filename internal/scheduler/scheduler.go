@@ -151,10 +151,23 @@ func runCrawlAnalyzeAndNotify() error {
 	if err != nil {
 		return err
 	}
-	results = ai.ApplyFocusFilter(results)
+
+	newsStorage := storage.NewNewsStorage()
+	// 与 HTTP /news/latest 同一口径：已在 news_items 出现过的 URL 本批不再送 LLM，仅新链做兴趣过滤后合并
+	if ai.FocusFilterEnforced() {
+		forAI, skip, nForAI, nSkip, perr := newsStorage.PartitionCrawlByPersistedItems(results)
+		if perr != nil {
+			l.Warn("partition for incremental ai filter failed, using full LLM pass", zap.Error(perr))
+			results = ai.ApplyFocusFilter(results)
+		} else {
+			l.Info("incremental aifilter",
+				zap.Int("candidates_llm", nForAI), zap.Int("skip_persisted", nSkip))
+			filtered := ai.ApplyFocusFilter(forAI)
+			results = ai.MergeHotlistByRank(filtered, skip)
+		}
+	}
 
 	// 本地持久化，方便前端查询历史
-	newsStorage := storage.NewNewsStorage()
 	crawlTime := time.Now()
 	for platformID, items := range results {
 		if err := newsStorage.SaveNewsData(platformID, items, crawlTime); err != nil {

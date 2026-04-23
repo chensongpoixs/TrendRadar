@@ -6,6 +6,7 @@ require (
 	github.com/gin-contrib/zap v1.1.7
 	github.com/gin-gonic/gin v1.12.0
 	github.com/joho/godotenv v1.5.1
+	github.com/kardianos/service v1.2.2
 	github.com/mmcdole/gofeed v1.1.1
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/viper v1.18.2

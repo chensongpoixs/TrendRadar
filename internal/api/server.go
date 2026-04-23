@@ -76,8 +76,11 @@ func (s *Server) registerRoutes() {
 		news := v1.Group("/news")
 		{
 			news.GET("/latest", GetLatestNews)
-			news.GET("/:date", GetNewsByDate)
 			news.GET("/search", SearchNews)
+			news.GET("/snapshots/dates", GetSnapshotAvailableDates)
+			news.GET("/snapshots/:date/summary", GetSnapshotDaySummary)
+			news.GET("/snapshots/:date/hour/:hour", GetSnapshotHour)
+			news.GET("/:date", GetNewsByDate)
 		}
 
 		// 话题统计

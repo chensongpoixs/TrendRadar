@@ -82,9 +82,17 @@ go run ./cmd
 
 或先编译再运行（见下节），将工作目录设为本目录，或使用 `CONFIG_PATH` 指到绝对路径。
 
+**安装为系统服务**（Windows 服务 + Linux systemd，开机自启、与 `sc`/systemd 管理）：见 `docs/service-windows-linux.md`，摘要：
+
+- 可执行文件所在目录需包含 `config/` 等；程序会自动 **以 exe 所在目录为工作目录**。
+- 管理员 / root 下：`<binary> install`，再 `<binary> start`；卸载用 `uninstall`。
+- 服务名一般为 **`TrendRadar`**（可搜源码中 `kardianos` 的 `Name` 字段确认）。
+
+> 后台服务**不会**出现在任务栏/托盘；若需托盘图标，需另做客户端或计划任务在登录时启动，详见上述文档说明。
+
 ### 优雅退出
 
-支持 **Ctrl+C**（`SIGINT`）与 `SIGTERM`：会先停止定时调度器，再对 HTTP 做 **优雅关闭**（约 20s 内结束现有请求），再退出进程。
+前台运行时支持 **Ctrl+C**（`SIGINT`）与 `SIGTERM`：会先停止定时调度器，再对 HTTP 做 **优雅关闭**（约 20s 内结束现有请求），再退出进程。作为 **Windows 服务** 时由服务管理器停止，同样会走同一套 `Stop` 逻辑。
 
 ### 日志
 
@@ -149,6 +157,7 @@ go test ./...
 |------|------|
 | `docs/ai-prompts-and-analysis.md` | AI 分析、提示词与流程说明 |
 | `docs/ai-filter-batching.md` | 兴趣过滤：分批、`max_input_chars`、批间隔与独立 `max_output_tokens` |
+| `docs/service-windows-linux.md` | **安装为系统服务**（`install` / `sc` / `systemd`、开机自启） |
 | `docs/email-dedup.md` | 邮件去重与指纹策略 |
 
 ## 许可与上游
