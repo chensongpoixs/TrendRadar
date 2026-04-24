@@ -58,8 +58,10 @@ func NewServer() *Server {
 
 	s := &Server{router: router}
 
-	// 注册路由
+	// 注册路由（API 等固定路径须先注册）
 	s.registerRoutes()
+	// 托管本地前端构建目录 + SPA history 回退（未配置 web_root 则跳过）
+	s.registerWebUI()
 
 	return s
 }
@@ -77,11 +79,17 @@ func (s *Server) registerRoutes() {
 		{
 			news.GET("/latest", GetLatestNews)
 			news.GET("/search", SearchNews)
+			news.POST("/analyze", PostAnalyzeNewsArticle)
 			news.GET("/snapshots/dates", GetSnapshotAvailableDates)
 			news.GET("/snapshots/:date/summary", GetSnapshotDaySummary)
 			news.GET("/snapshots/:date/hour/:hour", GetSnapshotHour)
+			news.GET("/snapshots/:date/insights", GetSnapshotDayInsights)
+			news.POST("/snapshots/:date/insights", PostSnapshotDayInsights)
 			news.GET("/:date", GetNewsByDate)
 		}
+
+		// 大模型对话（后端转发，key 不暴露给前端）
+		v1.POST("/ai/chat", PostAIChat)
 
 		// 话题统计
 		v1.GET("/topics/trending", GetTrendingTopics)

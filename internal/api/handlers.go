@@ -88,6 +88,42 @@ func GetLatestNews(c *gin.Context) {
 	})
 }
 
+// PostAnalyzeNewsArticle 用户主动请求：对单条新闻做「读报式」AI 汇报摘要；默认不自动调用本接口。
+// 成功时尽量拉取页面正文片段；失败则仅基于标题做保守说明。
+func PostAnalyzeNewsArticle(c *gin.Context) {
+	var body struct {
+		Title      string `json:"title" binding:"required"`
+		URL        string `json:"url" binding:"required"`
+		SourceName string `json:"source_name"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	summary, fetched, textLen, err := ai.SummarizeNewsArticle(c.Request.Context(), body.Title, body.URL, body.SourceName)
+	if err != nil {
+		applog.WithComponent("api").Warn("news article analyze failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"summary":           summary,
+			"title":             body.Title,
+			"url":               body.URL,
+			"content_fetched":   fetched,
+			"extracted_runes":   textLen,
+		},
+	})
+}
+
 func buildAINewsSummary(results map[string][]model.NewsItem, idToName map[string]string) (gin.H, error) {
 	cfg := config.Get()
 	maxNews := cfg.AIAnalysis.MaxNewsForAnalysis
@@ -244,6 +280,136 @@ func GetSnapshotHour(c *gin.Context) {
 			"timezone":   cfg.App.Timezone,
 			"items":      items,
 			"id_to_name": idToName,
+		},
+	})
+}
+
+// GetSnapshotDayInsights 返回该日已缓存的「行业 AI 研报」；若无则 cached=false
+func GetSnapshotDayInsights(c *gin.Context) {
+	date := c.Param("date")
+	if _, ok := parseYMD(date); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "invalid date, expected YYYY-MM-DD",
+		})
+		return
+	}
+	newsStorage := storage.NewNewsStorage()
+	row, err := newsStorage.GetDayIndustryReport(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	cfg := config.Get()
+	if row == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"data": gin.H{
+				"date":     date,
+				"timezone": cfg.App.Timezone,
+				"cached":   false,
+				"content":  "",
+				"model":    "",
+			},
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"date":       date,
+			"timezone":   cfg.App.Timezone,
+			"cached":     true,
+			"content":    row.Content,
+			"model":      row.Model,
+			"updated_at": row.UpdatedAt.UTC().Format(time.RFC3339),
+		},
+	})
+}
+
+// PostSnapshotDayInsights 基于该日热榜标题流生成（并缓存）行业向 AI 研报；无快照时 400
+func PostSnapshotDayInsights(c *gin.Context) {
+	date := c.Param("date")
+	if _, ok := parseYMD(date); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "invalid date, expected YYYY-MM-DD",
+		})
+		return
+	}
+	platforms := c.QueryArray("platforms")
+	newsStorage := storage.NewNewsStorage()
+	_, total, err := newsStorage.GetSnapshotDaySummary(date)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	if total == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "该日无热榜快照，无法生成研报",
+		})
+		return
+	}
+	dres, err := newsStorage.BuildSnapshotDayDigest(date, platforms, 0)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	if dres == nil || strings.TrimSpace(dres.Digest) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "无可用标题流（筛选后可能为空）",
+		})
+		return
+	}
+	cfg := config.Get()
+	tz := "UTC"
+	if cfg != nil {
+		tz = cfg.App.Timezone
+	}
+	content, err := ai.GenerateDayIndustryReport(c.Request.Context(), date, dres.Digest, tz)
+	if err != nil {
+		applog.WithComponent("api").Warn("day industry report failed", zap.Error(err), zap.String("date", date))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	modelName := ""
+	if cfg != nil {
+		modelName = cfg.AI.Model
+	}
+	if err := newsStorage.SaveDayIndustryReport(date, content, modelName); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"date":              date,
+			"timezone":          tz,
+			"cached":            true,
+			"content":           content,
+			"model":             modelName,
+			"updated_at":        now,
+			"unique_titles":     dres.UniqueTitles,
+			"raw_snapshot_rows": dres.RawRowCount,
+			"digest_truncated":  dres.Truncated,
 		},
 	})
 }

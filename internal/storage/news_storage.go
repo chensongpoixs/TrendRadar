@@ -2,10 +2,12 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/trendradar/backend-go/internal/core"
 	"github.com/trendradar/backend-go/pkg/config"
@@ -507,14 +509,40 @@ type SnapshotHourStat struct {
 	LastCaptured  string `json:"last_captured"`
 }
 
+// parseAggregatedCapturedAt 将 SQLite 对 MIN/MAX(captured_at) 返回的字符串（或已是 RFC3339）规范为 UTC RFC3339。
+func parseAggregatedCapturedAt(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.Local); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return s
+}
+
 // GetSnapshotDaySummary 按日汇总：各小时行数与首尾抓取时间
 func (s *NewsStorage) GetSnapshotDaySummary(dateLocal string) ([]SnapshotHourStat, int64, error) {
 	db := core.GetDB()
+	// SQLite 对 MIN/MAX(时间列) 常以 string 返回，不能 Scan 到 time.Time（会报 unsupported Scan）
 	type agg struct {
-		Hour          int       `gorm:"column:hour"`
-		RowCount      int64     `gorm:"column:row_count"`
-		FirstCaptured time.Time `gorm:"column:first_captured"`
-		LastCaptured  time.Time `gorm:"column:last_captured"`
+		Hour          int    `gorm:"column:hour"`
+		RowCount      int64  `gorm:"column:row_count"`
+		FirstCaptured string `gorm:"column:first_captured"`
+		LastCaptured  string `gorm:"column:last_captured"`
 	}
 	var aggs []agg
 	err := db.Model(&model.HotlistSnapshot{}).
@@ -535,8 +563,8 @@ func (s *NewsStorage) GetSnapshotDaySummary(dateLocal string) ([]SnapshotHourSta
 		out = append(out, SnapshotHourStat{
 			Hour:          a.Hour,
 			RowCount:      a.RowCount,
-			FirstCaptured: a.FirstCaptured.UTC().Format(time.RFC3339),
-			LastCaptured:  a.LastCaptured.UTC().Format(time.RFC3339),
+			FirstCaptured: parseAggregatedCapturedAt(a.FirstCaptured),
+			LastCaptured:  parseAggregatedCapturedAt(a.LastCaptured),
 		})
 	}
 	return out, total, nil
@@ -580,4 +608,127 @@ func (s *NewsStorage) GetSnapshotForHour(dateLocal string, hour int, platformIDs
 		return deduped[i].Title < deduped[j].Title
 	})
 	return deduped, nil
+}
+
+// defaultDayDigestMaxRunes 整日标题流默认最大字符数（按 rune 计），以适配大上下文模型输入预算
+const defaultDayDigestMaxRunes = 120_000
+
+// SnapshotDayDigestResult 某日多时刻快照按 URL 去重、排序后拼成 AI 可读的「标题流」
+type SnapshotDayDigestResult struct {
+	Digest        string
+	UniqueTitles  int
+	RawRowCount   int
+	Truncated     bool
+	MaxRunesLimit int
+}
+
+// BuildSnapshotDayDigest 读取该日所有 hotlist_snapshots，按 source+url 仅保留最晚一次抓取，再按小时与 rank 排序，拼为文本行并截断至 maxRunes（≤0 时用 defaultDayDigestMaxRunes）。
+func (s *NewsStorage) BuildSnapshotDayDigest(dateLocal string, platformIDs []string, maxRunes int) (*SnapshotDayDigestResult, error) {
+	if maxRunes <= 0 {
+		maxRunes = defaultDayDigestMaxRunes
+	}
+	db := core.GetDB()
+	q := db.Where("date_local = ?", dateLocal)
+	if len(platformIDs) > 0 {
+		q = q.Where("source_id IN ?", platformIDs)
+	}
+	var raw []model.HotlistSnapshot
+	if err := q.Order("captured_at DESC, hour_local ASC, rank ASC, title ASC").Find(&raw).Error; err != nil {
+		return nil, err
+	}
+	nRaw := len(raw)
+	seen := make(map[string]struct{})
+	deduped := make([]model.HotlistSnapshot, 0, nRaw/2)
+	for _, r := range raw {
+		key := r.SourceID + "\x00" + NormalizeURL(r.URL)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, r)
+	}
+	sort.Slice(deduped, func(i, j int) bool {
+		hi, hj := deduped[i].HourLocal, deduped[j].HourLocal
+		if hi != hj {
+			return hi < hj
+		}
+		ri, rj := deduped[i].Rank, deduped[j].Rank
+		if ri != rj {
+			if ri == 0 {
+				return false
+			}
+			if rj == 0 {
+				return true
+			}
+			return ri < rj
+		}
+		return strings.Compare(deduped[i].Title, deduped[j].Title) < 0
+	})
+	var b strings.Builder
+	sep := " | "
+	for _, r := range deduped {
+		name := strings.TrimSpace(r.SourceName)
+		if name == "" {
+			name = r.SourceID
+		}
+		line := fmt.Sprintf("%02d:00 %s %s", r.HourLocal, name+sep, r.Title)
+		if strings.TrimSpace(r.URL) != "" {
+			line += " " + strings.TrimSpace(r.URL)
+		}
+		line += "\n"
+		if _, err := b.WriteString(line); err != nil {
+			return nil, err
+		}
+	}
+	out := b.String()
+	truncated := false
+	if utf8.RuneCountInString(out) > maxRunes {
+		truncated = true
+		rs := []rune(out)
+		if len(rs) > maxRunes {
+			out = string(rs[:maxRunes])
+		}
+		footer := fmt.Sprintf("\n[输入已按 %d 字截断；本日去重后共 %d 条标题。]\n", maxRunes, len(deduped))
+		out = strings.TrimSpace(out) + "\n" + footer
+	}
+	return &SnapshotDayDigestResult{
+		Digest:        strings.TrimSpace(out),
+		UniqueTitles:  len(deduped),
+		RawRowCount:   nRaw,
+		Truncated:     truncated,
+		MaxRunesLimit: maxRunes,
+	}, nil
+}
+
+// GetDayIndustryReport 读取已缓存的整日行业 AI 研报；无记录时返回 (nil, nil)
+func (s *NewsStorage) GetDayIndustryReport(dateLocal string) (*model.DayIndustryReport, error) {
+	var row model.DayIndustryReport
+	err := core.GetDB().Where("date_local = ?", dateLocal).First(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+// SaveDayIndustryReport 写入或更新某日研报缓存
+func (s *NewsStorage) SaveDayIndustryReport(dateLocal, content, modelName string) error {
+	db := core.GetDB()
+	var row model.DayIndustryReport
+	err := db.Where("date_local = ?", dateLocal).First(&row).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		return db.Create(&model.DayIndustryReport{
+			DateLocal: dateLocal,
+			Content:   content,
+			Model:     modelName,
+		}).Error
+	}
+	row.Content = content
+	row.Model = modelName
+	return db.Save(&row).Error
 }

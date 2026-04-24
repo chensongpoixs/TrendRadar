@@ -43,6 +43,9 @@ type ServerConfig struct {
 	Host string `mapstructure:"host"`
 	Port int    `mapstructure:"port"`
 	Mode string `mapstructure:"mode"` // debug/release/test
+	// WebRoot 非空时从该目录托管已构建的前端静态资源（如 frontend-vue 的 dist），与 API 同端口；空则仅提供 API。
+	// 相对路径相对「config.yaml 所在目录」解析（与 filter.interests_file 一致）。
+	WebRoot string `mapstructure:"web_root"`
 }
 
 // LoggingConfig 日志（zap + lumberjack 轮转文件，见 pkg/logger）
@@ -299,6 +302,8 @@ type BatchSizeConfig struct {
 // Config 单例
 var instance *Config
 var v *viper.Viper
+// configYAMLDir 当前使用的 config.yaml 所在目录，供 WebRoot 等相对路径解析
+var configYAMLDir string
 
 // Init 初始化配置
 func Init(configPath string) error {
@@ -320,6 +325,11 @@ func Init(configPath string) error {
 	// 读取配置文件
 	if err := v.ReadInConfig(); err != nil {
 		return err
+	}
+	if used := v.ConfigFileUsed(); used != "" {
+		configYAMLDir = filepath.Dir(used)
+	} else {
+		configYAMLDir = ""
 	}
 
 	// 解码配置
@@ -384,6 +394,7 @@ func setDefaults() {
 	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.mode", "debug")
+	v.SetDefault("server.web_root", "")
 
 	v.SetDefault("database.driver", "sqlite")
 	v.SetDefault("database.database", "trendradar.db")
@@ -434,6 +445,28 @@ func setDefaults() {
 // Get 获取配置实例
 func Get() *Config {
 	return instance
+}
+
+// ResolveServerWebRoot 将 server.web_root 配置解析为绝对路径；未在配置中填写时返回空字符串（不检查路径是否存在）
+func ResolveServerWebRoot() string {
+	if instance == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(instance.Server.WebRoot)
+	if raw == "" {
+		return ""
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw)
+	}
+	if configYAMLDir != "" {
+		return filepath.Clean(filepath.Join(configYAMLDir, raw))
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(filepath.Join(wd, raw))
 }
 
 // GetViper 获取 viper 实例

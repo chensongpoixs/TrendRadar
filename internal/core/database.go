@@ -78,6 +78,7 @@ func migrateDatabase() error {
 		&model.RankHistory{},
 		&model.EmailSentFingerprint{},
 		&model.HotlistSnapshot{},
+		&model.DayIndustryReport{},
 	)
 }
 

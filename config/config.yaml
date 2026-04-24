@@ -6,8 +6,11 @@ app:
 
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 20900
   mode: "debug"
+  # 非空时从该目录提供已构建的前端（npm run build 输出，需含 index.html；相对路径相对「本文件所在目录」= backend-go/config/）
+  # 与 frontend-vue 同级时须写 ../../frontend-vue/dist（多一级 ../ 到仓库根，再到 frontend-vue）
+  web_root: "../../frontend-vue/dist"
 
 # 结构化日志：zap + lumberjack 轮转；标准库 log 会重定向到同一套输出（redirect_std: true）
 logging:
