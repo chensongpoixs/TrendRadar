@@ -28,57 +28,77 @@ func NewDispatcher() *Dispatcher {
 	return &Dispatcher{config: &cfg}
 }
 
-// Send 发送通知到所有已配置的渠道
+// Send 发送通知到所有已配置的渠道（各渠道同一份内容；与 SendWithWeChatMarkdown 等效，微信与其它相同）
 func (d *Dispatcher) Send(title, message string) map[string]bool {
+	return d.sendWithWeChatBody(title, message, message)
+}
+
+// SendWithWeChatMarkdown 与 Send 相同，但 Server 酱（desp）使用 wechatMarkdown，其余渠道使用 bodyForOther（通常为 HTML 邮件体）
+func (d *Dispatcher) SendWithWeChatMarkdown(title, bodyForOther, wechatMarkdown string) map[string]bool {
+	if strings.TrimSpace(wechatMarkdown) == "" {
+		wechatMarkdown = bodyForOther
+	}
+	return d.sendWithWeChatBody(title, bodyForOther, wechatMarkdown)
+}
+
+func (d *Dispatcher) sendWithWeChatBody(title, forOthers, wechatMD string) map[string]bool {
 	results := make(map[string]bool)
 
 	// 飞书
 	if d.config.Channels.Feishu.WebhookURL != "" {
-		results["feishu"] = d.sendToFeishu(title, message)
+		results["feishu"] = d.sendToFeishu(title, forOthers)
 	}
 
 	// 钉钉
 	if d.config.Channels.DingTalk.WebhookURL != "" {
-		results["dingtalk"] = d.sendToDingTalk(title, message)
+		results["dingtalk"] = d.sendToDingTalk(title, forOthers)
 	}
 
 	// 企业微信
 	if d.config.Channels.WeWork.WebhookURL != "" {
-		results["wework"] = d.sendToWeWork(title, message)
+		results["wework"] = d.sendToWeWork(title, forOthers)
 	}
 
-	// 个人微信（Server 酱）。若启用 batch_enabled 则仅由定时合并任务推送，此处不发送
+	// 个人微信（Server 酱 desp=Markdown）。若启用 batch_enabled 则仅由定时合并任务推送，此处不发送
 	sc := d.config.Channels.ServerChan
 	if strings.TrimSpace(sc.SendKey) != "" && !sc.BatchEnabled {
-		results["serverchan"] = d.sendToServerChan(title, message)
+		results["serverchan"] = d.sendToServerChan(title, wechatMD)
 	}
 
 	// Telegram
 	if d.config.Channels.Telegram.BotToken != "" && d.config.Channels.Telegram.ChatID != "" {
-		results["telegram"] = d.sendToTelegram(title, message)
+		results["telegram"] = d.sendToTelegram(title, forOthers)
 	}
 
 	// 邮件
 	if d.config.Channels.Email.From != "" && d.config.Channels.Email.To != "" {
-		results["email"] = d.sendToEmail(title, message)
+		results["email"] = d.sendToEmail(title, forOthers)
 	}
 
 	// ntfy
 	if d.config.Channels.Ntfy.Topic != "" {
-		results["ntfy"] = d.sendToNtfy(title, message)
+		results["ntfy"] = d.sendToNtfy(title, forOthers)
 	}
 
 	// Bark
 	if d.config.Channels.Bark.URL != "" {
-		results["bark"] = d.sendToBark(title, message)
+		results["bark"] = d.sendToBark(title, forOthers)
 	}
 
 	// Slack
 	if d.config.Channels.Slack.WebhookURL != "" {
-		results["slack"] = d.sendToSlack(title, message)
+		results["slack"] = d.sendToSlack(title, forOthers)
 	}
 
 	return results
+}
+
+// SendServerChanOnce 向 Server 酱发送一条（desp 为 Markdown；不受 batch_enabled 影响）
+func (d *Dispatcher) SendServerChanOnce(title, message string) bool {
+	if strings.TrimSpace(d.config.Channels.ServerChan.SendKey) == "" {
+		return false
+	}
+	return d.sendToServerChan(title, message)
 }
 
 // sendToFeishu 发送到飞书
@@ -153,7 +173,7 @@ func (d *Dispatcher) sendToWeWork(title, message string) bool {
 	return sendWebhook(webhookURL, data)
 }
 
-// sendToServerChan 推送到 Server 酱，用户在同一微信中关注服务号并绑定后可在个人微信收通知
+// sendToServerChan 推送到 Server 酱。title 为短标题；message（desp）为 **Markdown** 正文（方糖/Turbo 支持）
 // API: https://sctapi.ftqq.com/{sendkey}.send （Turbo 版，application/json: title, desp）
 func (d *Dispatcher) sendToServerChan(title, message string) bool {
 	key := strings.TrimSpace(d.config.Channels.ServerChan.SendKey)

@@ -147,9 +147,9 @@ func RunServerChanBatchJob(now time.Time) {
 	var b strings.Builder
 	for i, seg := range picked {
 		if i > 0 {
-			b.WriteString("\n\n──────────\n\n")
+			b.WriteString("\n\n---\n\n")
 		}
-		b.WriteString(fmt.Sprintf("【时段 %s】\n", seg.At.In(loc).Format("01-02 15:04")))
+		b.WriteString(fmt.Sprintf("### 时段 %s\n\n", seg.At.In(loc).Format("01-02 15:04")))
 		b.WriteString(seg.Text)
 	}
 	merged := b.String()

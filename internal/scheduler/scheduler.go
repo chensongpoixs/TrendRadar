@@ -254,10 +254,25 @@ func runCrawlAnalyzeAndNotify() error {
 		formatMobileNewsBrief(emailResults, idToName, crawlTime),
 	)
 	report := formatEmailHTML(emailResults, idToName, crawlTime, mailCount, rssTotal, failedIDs, filterMode, emailSkipped)
+	// 与邮件同构的 Markdown，专供微信 Server 酱（desp）
+	mdReport := notification.BuildNewsDigestMarkdown(
+		time.Now(),
+		len(results),
+		afterAICount,
+		mailCount,
+		emailSkipped,
+		rssTotal,
+		failedIDs,
+		filterMode,
+		emailResults,
+		idToName,
+		crawlTime,
+	)
 
-	// Server 酱「合并推送」：先累积本小时纯文本摘要（与是否发邮件无关，仅要求有本批新内容）
-	if cfg.Notification.Enabled && mailCount > 0 && cfg.Notification.Channels.ServerChan.BatchEnabled {
-		if err := notification.AppendServerChanBatchSegment(plainReport, crawlTime); err != nil {
+	// Server 酱「合并推送」入队（Markdown 段）。首次且 notify_on_startup 时将在发信后立刻补推，本批不入队避免重复
+	skipSCBatchAppend := notification.IsFirstStartWeChatLikeEmailPending()
+	if cfg.Notification.Enabled && mailCount > 0 && cfg.Notification.Channels.ServerChan.BatchEnabled && !skipSCBatchAppend {
+		if err := notification.AppendServerChanBatchSegment(mdReport, crawlTime); err != nil {
 			l.Warn("serverchan batch segment append failed", zap.Error(err))
 		}
 	}
@@ -276,13 +291,26 @@ func runCrawlAnalyzeAndNotify() error {
 		return nil
 	}
 	dispatcher := notification.NewDispatcher()
-	sendResult := dispatcher.Send("趋势雷达 每小时关注标题汇总", report)
+	sendResult := dispatcher.SendWithWeChatMarkdown("趋势雷达 每小时关注标题汇总", report, mdReport)
 	if ok, exists := sendResult["email"]; !exists || !ok {
 		l.Warn("email html send failed, retry plain text", zap.String("to", cfg.Notification.Channels.Email.To))
-		sendResult = dispatcher.Send("趋势雷达 每小时关注标题汇总", plainReport)
+		sendResult = dispatcher.SendWithWeChatMarkdown("趋势雷达 每小时关注标题汇总", plainReport, mdReport)
 	}
 	if ok, exists := sendResult["email"]; !exists || !ok {
 		return fmt.Errorf("email send failed: %v", sendResult)
+	}
+	// 首次启动且为 batch 合并：补一条与邮件同构的 **Markdown** 快报到微信
+	if mailCount > 0 && notification.IsFirstStartWeChatLikeEmailPending() {
+		d2 := notification.NewDispatcher()
+		if d2.SendServerChanOnce("趋势雷达 每小时关注标题汇总", mdReport) {
+			if err := notification.MarkFirstStartWeChatLikeEmailDone(); err != nil {
+				l.Warn("mark first-start wechat done failed", zap.Error(err))
+			} else {
+				l.Info("first-start wechat sent (markdown digest, aligned with email)")
+			}
+		} else {
+			l.Warn("first-start wechat send failed, will retry on next successful email")
+		}
 	}
 	if err := storage.RecordEmailSent(emailResults); err != nil {
 		l.Error("record email fingerprints failed", zap.Error(err))

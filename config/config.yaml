@@ -128,6 +128,8 @@ notification:
       slot_hours: "9,12,16,20,23"
       max_pushes_per_day: 5
       merge_segments: 2
+      # 首次成功发邮件后，在 batch 模式下补一条与邮件纯文（AI 快报）相同的微信；非 batch 已随 Send 推送
+      notify_on_startup: true
     email:
       from: "15850774503@163.com" # 例如: your_mail@163.com
       password: "SYhwjQhsBimapRd3" # 163 邮箱授权码（不是登录密码）

@@ -210,6 +210,8 @@ type ServerChanConfig struct {
 	SlotHours     string `mapstructure:"slot_hours"`       // 逗号分隔，如 8,11,14,17,20 约每 3 小时一次
 	MaxPushesPerDay int  `mapstructure:"max_pushes_per_day"` // 每日 Server 酱最多条数，默认 5
 	MergeSegments   int  `mapstructure:"merge_segments"`     // 每次合并「最近 N 段」小时摘要，默认 2
+	// NotifyOnStartup 开启 batch 时：首次成功发邮件后补一条与邮件纯文（AI 过滤快报）相同的微信；非 batch 时一次 Send 已含微信
+	NotifyOnStartup bool `mapstructure:"notify_on_startup"`
 }
 
 type WebhookConfig struct {
@@ -433,6 +435,7 @@ func setDefaults() {
 	v.SetDefault("notification.channels.serverchan.slot_hours", "8,11,14,17,20")
 	v.SetDefault("notification.channels.serverchan.max_pushes_per_day", 5)
 	v.SetDefault("notification.channels.serverchan.merge_segments", 2)
+	v.SetDefault("notification.channels.serverchan.notify_on_startup", true)
 
 	v.SetDefault("ai_filter.batch_size", 20)
 	v.SetDefault("ai_filter.batch_interval", 0)
