@@ -281,25 +281,30 @@ func runCrawlAnalyzeAndNotify() error {
 		l.Info("notification disabled, skip email", zap.Bool("data_saved", true))
 		return nil
 	}
-	if strings.TrimSpace(cfg.Notification.Channels.Email.To) == "" {
-		l.Info("email recipient empty, skip email", zap.Bool("data_saved", true))
-		return nil
-	}
 	if mailCount == 0 {
 		l.Info("email skipped no new after dedup",
 			zap.Int("after_ai_count", afterAICount), zap.Int("dedup_excluded", emailSkipped))
 		return nil
 	}
+
+	emailTo := strings.TrimSpace(cfg.Notification.Channels.Email.To)
+	needEmail := emailTo != ""
+
 	dispatcher := notification.NewDispatcher()
 	sendResult := dispatcher.SendWithWeChatMarkdown("趋势雷达 每小时关注标题汇总", report, mdReport)
-	if ok, exists := sendResult["email"]; !exists || !ok {
-		l.Warn("email html send failed, retry plain text", zap.String("to", cfg.Notification.Channels.Email.To))
-		sendResult = dispatcher.SendWithWeChatMarkdown("趋势雷达 每小时关注标题汇总", plainReport, mdReport)
+	if needEmail {
+		if ok, exists := sendResult["email"]; !exists || !ok {
+			l.Warn("email html send failed, retry plain text", zap.String("to", emailTo))
+			sendResult = dispatcher.SendWithWeChatMarkdown("趋势雷达 每小时关注标题汇总", plainReport, mdReport)
+		}
+		if ok, exists := sendResult["email"]; !exists || !ok {
+			return fmt.Errorf("email send failed: %v", sendResult)
+		}
+	} else {
+		// 未配收件人时仍走统一分发：飞书/钉钉/非 batch 的 Server 酱等会照常发送，不再因无 SMTP 而整段 return
+		l.Info("email recipient empty, skip smtp; wechat/others (if configured) still sent", zap.String("to", ""))
 	}
-	if ok, exists := sendResult["email"]; !exists || !ok {
-		return fmt.Errorf("email send failed: %v", sendResult)
-	}
-	// 首次启动且为 batch 合并：补一条与邮件同构的 **Markdown** 快报到微信
+	// 首次启动且为 batch 合并：补一条与邮件同构的 **Markdown** 快报到微信（不依赖发信成功；仅当 batch 且首启时才会 true）
 	if mailCount > 0 && notification.IsFirstStartWeChatLikeEmailPending() {
 		d2 := notification.NewDispatcher()
 		if d2.SendServerChanOnce("趋势雷达 每小时关注标题汇总", mdReport) {
@@ -309,15 +314,20 @@ func runCrawlAnalyzeAndNotify() error {
 				l.Info("first-start wechat sent (markdown digest, aligned with email)")
 			}
 		} else {
-			l.Warn("first-start wechat send failed, will retry on next successful email")
+			l.Warn("first-start wechat send failed, will retry on next run with new content")
 		}
 	}
 	if err := storage.RecordEmailSent(emailResults); err != nil {
 		l.Error("record email fingerprints failed", zap.Error(err))
 	}
-	l.Info("scheduled email sent",
-		zap.String("to", cfg.Notification.Channels.Email.To),
-		zap.Int("new_count", mailCount), zap.Int("dedup_excluded", emailSkipped))
+	if needEmail {
+		l.Info("scheduled email sent",
+			zap.String("to", emailTo),
+			zap.Int("new_count", mailCount), zap.Int("dedup_excluded", emailSkipped))
+	} else {
+		l.Info("notification sent (no smtp to)",
+			zap.Int("new_count", mailCount), zap.Int("dedup_excluded", emailSkipped))
+	}
 	return nil
 }
 
