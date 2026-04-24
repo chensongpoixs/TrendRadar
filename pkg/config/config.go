@@ -198,6 +198,18 @@ type ChannelConfig struct {
 	Bark           BarkConfig     `mapstructure:"bark"`
 	Slack          WebhookConfig  `mapstructure:"slack"`
 	GenericWebhook WebhookConfig  `mapstructure:"generic_webhook"`
+	// ServerChan 个人微信通知（Server 酱 sctapi，见 https://sct.ftqq.com）
+	ServerChan ServerChanConfig `mapstructure:"serverchan"`
+}
+
+// ServerChanConfig Server 酱 SendKey，用于将推送转到用户已绑定的微信
+type ServerChanConfig struct {
+	SendKey      string `mapstructure:"sendkey"`
+	// BatchEnabled 为 true 时：不随邮件即时推送，由定时任务按 slot 合并多段纯文本后推送（见 merge_segments）
+	BatchEnabled  bool   `mapstructure:"batch_enabled"`
+	SlotHours     string `mapstructure:"slot_hours"`       // 逗号分隔，如 8,11,14,17,20 约每 3 小时一次
+	MaxPushesPerDay int  `mapstructure:"max_pushes_per_day"` // 每日 Server 酱最多条数，默认 5
+	MergeSegments   int  `mapstructure:"merge_segments"`     // 每次合并「最近 N 段」小时摘要，默认 2
 }
 
 type WebhookConfig struct {
@@ -417,6 +429,10 @@ func setDefaults() {
 	v.SetDefault("ai.max_tokens", 5000)
 
 	v.SetDefault("notification.enabled", true)
+	v.SetDefault("notification.channels.serverchan.batch_enabled", false)
+	v.SetDefault("notification.channels.serverchan.slot_hours", "8,11,14,17,20")
+	v.SetDefault("notification.channels.serverchan.max_pushes_per_day", 5)
+	v.SetDefault("notification.channels.serverchan.merge_segments", 2)
 
 	v.SetDefault("ai_filter.batch_size", 20)
 	v.SetDefault("ai_filter.batch_interval", 0)
@@ -445,6 +461,15 @@ func setDefaults() {
 // Get 获取配置实例
 func Get() *Config {
 	return instance
+}
+
+// SanitizeNotificationForAPI 供 GET /config 等接口返回，避免敏感字段原文泄露
+func SanitizeNotificationForAPI(n NotificationConfig) NotificationConfig {
+	n2 := n
+	if strings.TrimSpace(n2.Channels.ServerChan.SendKey) != "" {
+		n2.Channels.ServerChan.SendKey = "(configured)"
+	}
+	return n2
 }
 
 // ResolveServerWebRoot 将 server.web_root 配置解析为绝对路径；未在配置中填写时返回空字符串（不检查路径是否存在）

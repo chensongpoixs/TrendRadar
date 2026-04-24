@@ -1283,7 +1283,7 @@ func GetCurrentConfig(c *gin.Context) {
 		}
 	case "push":
 		result = gin.H{
-			"notification": cfg.Notification,
+			"notification": config.SanitizeNotificationForAPI(cfg.Notification),
 		}
 	case "keywords":
 		// TODO: 加载关键词配置
@@ -1302,7 +1302,7 @@ func GetCurrentConfig(c *gin.Context) {
 			"report":     cfg.Report,
 			"filter":     cfg.Filter,
 			"ai":         cfg.AI,
-			"notification": cfg.Notification,
+			"notification": config.SanitizeNotificationForAPI(cfg.Notification),
 			"storage":    cfg.Storage,
 		}
 	}

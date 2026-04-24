@@ -50,6 +50,7 @@ func (s *Scheduler) Start() error {
 
 	// 根据预设配置定时任务
 	s.configureCronJobs()
+	s.addServerChanBatchJob()
 
 	// 启动 cron
 	s.cron.Start()
@@ -103,6 +104,29 @@ func (s *Scheduler) configureCronJobs() {
 		// 默认每小时运行一次
 		addJob("0 0 * * * *")
 	}
+}
+
+// addServerChanBatchJob Server 酱合并推送：在 slot_hours 整点把最近 N 段小时摘要合并发出（每日 cap 见配置）
+func (s *Scheduler) addServerChanBatchJob() {
+	cfg := config.Get()
+	if cfg == nil {
+		return
+	}
+	sc := cfg.Notification.Channels.ServerChan
+	if !sc.BatchEnabled || strings.TrimSpace(sc.SendKey) == "" {
+		return
+	}
+	spec := notification.BuildServerChanCronSpec(sc.SlotHours)
+	if spec == "" {
+		return
+	}
+	if _, err := s.cron.AddFunc(spec, func() {
+		notification.RunServerChanBatchJob(time.Now())
+	}); err != nil {
+		logger.WithComponent("scheduler").Error("add serverchan batch cron failed", zap.String("spec", spec), zap.Error(err))
+		return
+	}
+	logger.WithComponent("scheduler").Info("serverchan batch cron registered", zap.String("spec", spec))
 }
 
 // runCrawlTask 运行抓取任务
@@ -230,6 +254,13 @@ func runCrawlAnalyzeAndNotify() error {
 		formatMobileNewsBrief(emailResults, idToName, crawlTime),
 	)
 	report := formatEmailHTML(emailResults, idToName, crawlTime, mailCount, rssTotal, failedIDs, filterMode, emailSkipped)
+
+	// Server 酱「合并推送」：先累积本小时纯文本摘要（与是否发邮件无关，仅要求有本批新内容）
+	if cfg.Notification.Enabled && mailCount > 0 && cfg.Notification.Channels.ServerChan.BatchEnabled {
+		if err := notification.AppendServerChanBatchSegment(plainReport, crawlTime); err != nil {
+			l.Warn("serverchan batch segment append failed", zap.Error(err))
+		}
+	}
 
 	if !cfg.Notification.Enabled {
 		l.Info("notification disabled, skip email", zap.Bool("data_saved", true))

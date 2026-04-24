@@ -47,6 +47,12 @@ func (d *Dispatcher) Send(title, message string) map[string]bool {
 		results["wework"] = d.sendToWeWork(title, message)
 	}
 
+	// 个人微信（Server 酱）。若启用 batch_enabled 则仅由定时合并任务推送，此处不发送
+	sc := d.config.Channels.ServerChan
+	if strings.TrimSpace(sc.SendKey) != "" && !sc.BatchEnabled {
+		results["serverchan"] = d.sendToServerChan(title, message)
+	}
+
 	// Telegram
 	if d.config.Channels.Telegram.BotToken != "" && d.config.Channels.Telegram.ChatID != "" {
 		results["telegram"] = d.sendToTelegram(title, message)
@@ -145,6 +151,72 @@ func (d *Dispatcher) sendToWeWork(title, message string) bool {
 	}
 
 	return sendWebhook(webhookURL, data)
+}
+
+// sendToServerChan 推送到 Server 酱，用户在同一微信中关注服务号并绑定后可在个人微信收通知
+// API: https://sctapi.ftqq.com/{sendkey}.send （Turbo 版，application/json: title, desp）
+func (d *Dispatcher) sendToServerChan(title, message string) bool {
+	key := strings.TrimSpace(d.config.Channels.ServerChan.SendKey)
+	if key == "" {
+		return false
+	}
+	// 接口对长度有限制，保守截断
+	t := truncateRunesForNotify(title, 100)
+	m := truncateRunesForNotify(message, 60000)
+	url := fmt.Sprintf("https://sctapi.ftqq.com/%s.send", key)
+	payload := map[string]interface{}{
+		"title": t,
+		"desp":  m,
+	}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		applog.WithComponent("notify").Error("serverchan marshal failed", zap.Error(err))
+		return false
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		applog.WithComponent("notify").Error("serverchan post failed", zap.Error(err))
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		applog.WithComponent("notify").Warn("serverchan non-2xx", zap.Int("status", resp.StatusCode), zap.String("body", string(body)))
+		return false
+	}
+	// 业务码：0 为成功
+	var scResp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &scResp); err == nil {
+		if scResp.Code != 0 {
+			applog.WithComponent("notify").Warn("serverchan api error", zap.Int("code", scResp.Code), zap.String("message", scResp.Message), zap.String("raw", string(body)))
+			return false
+		}
+	}
+	applog.WithComponent("notify").Info("serverchan ok", zap.String("title", t))
+	return true
+}
+
+func truncateRunesForNotify(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max > 8 {
+		return string(r[:max-8]) + "\n…(已截断)"
+	}
+	return string(r[:max])
 }
 
 // sendToTelegram 发送到 Telegram
