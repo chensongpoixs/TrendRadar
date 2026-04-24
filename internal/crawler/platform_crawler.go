@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,7 +91,13 @@ func (c *PlatformCrawler) fetchWithRetry(url, platformID string) ([]model.NewsIt
 
 	// 设置代理
 	if c.useProxy && c.proxyURL != "" {
-		// 代理配置
+		transport := &http.Transport{
+			Proxy: http.ProxyURL(c.parseProxyURL()),
+		}
+		c.client = &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		}
 	}
 
 	resp, err := c.client.Do(req)
@@ -179,4 +187,22 @@ func (c *PlatformCrawler) CrawlAll() (map[string][]model.NewsItem, map[string]st
 	wg.Wait()
 
 	return results, idToName, failedIDs, nil
+}
+
+// parseProxyURL 解析代理 URL，支持 http://、https://、socks5:// 协议
+func (c *PlatformCrawler) parseProxyURL() *url.URL {
+	proxyURL := c.proxyURL
+	// 如果没有协议前缀，添加 http://
+	if proxyURL != "" && !strings.HasPrefix(proxyURL, "http://") && !strings.HasPrefix(proxyURL, "https://") && !strings.HasPrefix(proxyURL, "socks5://") {
+		proxyURL = "http://" + proxyURL
+	}
+	if proxyURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		logger.WithComponent("crawler").Warn("failed to parse proxy URL", zap.String("url", proxyURL), zap.Error(err))
+		return nil
+	}
+	return parsed
 }

@@ -14,6 +14,150 @@
 | [zap](https://github.com/uber-go/zap) + [lumberjack](https://github.com/natefinch/lumberjack) | 结构化日志、按大小轮转落盘 |
 | [gin-contrib/zap](https://github.com/gin-contrib/zap) | HTTP 访问日志与 Recovery |
 
+## 新增特性（v2.0.0）
+
+### 安全特性
+
+#### 1. CORS 跨域支持
+
+默认启用跨域资源共享，支持自定义允许的来源、方法、头部。
+
+**配置示例：**
+```yaml
+server:
+  cors:
+    allow_origins: ["http://localhost:3000", "https://trendradar.example.com"]
+    allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers: ["Origin", "Content-Type", "Accept", "Authorization"]
+    allow_credentials: true
+    max_age: 43200  # 12 小时
+```
+
+**环境变量：**
+```bash
+TRENDRADAR_SERVER_CORS_ALLOW_ORIGINS=["http://localhost:3000"]
+TRENDRADAR_SERVER_CORS_ALLOW_CREDENTIALS=true
+```
+
+#### 2. API 认证中间件
+
+支持两级权限：**普通用户 (user)** 和 **管理员 (admin)**。
+
+**认证方式：**
+- 请求头 `X-API-Key`
+- 请求头 `Authorization: Bearer <token>`
+
+**配置示例：**
+```yaml
+server:
+  auth:
+    enabled: true
+    api_key: "your-api-key-here"
+    admin_api_key: "your-admin-key-here"
+    token_expiry: 24h
+    skip_paths:
+      - "/health"
+      - "/mcp"
+      - "/api/v1/system/status"
+```
+
+**环境变量：**
+```bash
+TRENDRADAR_SERVER_AUTH_ENABLED=true
+TRENDRADAR_SERVER_AUTH_API_KEY=your-secret-key
+TRENDRADAR_SERVER_AUTH_ADMIN_API_KEY=your-admin-key
+```
+
+#### 3. 代理支持
+
+爬虫支持通过 HTTP/HTTPS/SOCKS5 代理请求外部 API。
+
+**配置示例：**
+```yaml
+advanced:
+  crawler:
+    use_proxy: true
+    default_proxy: "http://proxy.example.com:8080"
+  rss:
+    use_proxy: true
+    proxy_url: "http://proxy.example.com:8080"
+```
+
+### MCP 协议完整实现
+
+实现 **MCP (Model Context Protocol)** JSON-RPC 2.0 协议，支持 AI 工具调用。
+
+**支持的 MCP 方法：**
+- `initialize` - 初始化连接
+- `tools/list` - 获取可用工具列表
+- `tools/call` - 调用工具
+- `resources/list` - 获取资源列表
+- `resources/read` - 读取资源内容
+
+**支持的 MCP 工具（26 个）：**
+
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| 数据查询 | `get_latest_news` | 获取最新新闻 |
+| 数据查询 | `get_news_by_date` | 按日期获取新闻 |
+| 数据查询 | `search_news` | 搜索新闻（keyword/fuzzy/entity） |
+| 数据查询 | `get_trending_topics` | 获取热门话题 |
+| 数据查询 | `get_latest_rss` | 获取最新 RSS |
+| 数据查询 | `search_rss` | 搜索 RSS |
+| 分析 | `analyze_topic_trend` | 分析话题趋势 |
+| 分析 | `analyze_sentiment` | 分析情感倾向 |
+| 分析 | `aggregate_news` | 新闻聚类聚合 |
+| 分析 | `compare_periods` | 对比不同时期 |
+| 系统 | `get_system_status` | 获取系统状态 |
+| 系统 | `get_current_config` | 获取当前配置 |
+| 快照 | `get_snapshot_dates` | 获取快照日期列表 |
+| 快照 | `get_snapshot_day_summary` | 获取某一天汇总 |
+| 快照 | `get_snapshot_hour` | 获取某小时快照 |
+| 快照 | `get_snapshot_insights` | 获取洞察报告 |
+| 快照 | `generate_day_insights` | 生成日报洞察 |
+| AI | `analyze_news_article` | 分析新闻文章 |
+| AI | `ai_chat` | AI 对话 |
+| 通知 | `send_notification` | 发送通知 |
+| 通知 | `get_channel_format_guide` | 获取渠道格式指南 |
+| 通知 | `get_notification_channels` | 获取通知渠道 |
+| 存储 | `sync_from_remote` | 远程同步 |
+| 存储 | `get_storage_status` | 获取存储状态 |
+| 存储 | `list_available_dates` | 列出可用日期 |
+| 工具 | `resolve_date_range` | 解析日期范围 |
+
+**MCP 资源（4 个）：**
+- `config://platforms` - 平台配置
+- `config://rss-feeds` - RSS 源配置
+- `data://available-dates` - 可用数据日期
+- `config://keywords` - 关键词配置
+
+### URL 标准化
+
+实现完整的 URL 去重标准化功能，确保排名历史准确。
+
+**功能特性：**
+- 协议前缀保护（`https://`、`http://`）
+- 跟踪参数过滤（UTM、share、ref 等 40+ 参数）
+- 路径规范化（移除重复斜杠、尾部斜杠）
+- 大小写统一
+- 片段标识符移除
+
+**测试覆盖：** 15+ 测试用例，全部通过。
+
+### 测试覆盖
+
+| 模块 | 测试文件 | 用例数 | 状态 |
+|------|----------|--------|------|
+| URL 标准化 | `news_storage_test.go` | 15+ | ✅ PASS |
+| CORS 中间件 | `middleware_test.go` | 4 | ✅ PASS |
+| 认证中间件 | `middleware_test.go` | 9 | ✅ PASS |
+| 代理功能 | - | - | ✅ 编译通过 |
+
+**运行测试：**
+```bash
+go test ./internal/storage/... ./internal/api/... -v
+```
+
 ## 目录结构
 
 ```
@@ -130,6 +274,7 @@ go build -trimpath -ldflags="-s -w" -o trendradar ./cmd
 | GET | `/api/v1/news/latest` | 最新热榜数据 |
 | GET | `/api/v1/news/:date` | 按日期 |
 | GET | `/api/v1/news/search` | 搜索 |
+| GET | `/api/v1/news/analyze` | AI 分析文章 |
 | GET | `/api/v1/topics/trending` | 话题 |
 | GET | `/api/v1/rss/latest` | RSS 最新 |
 | GET | `/api/v1/rss/search` | RSS 搜索 |
@@ -141,24 +286,72 @@ go build -trimpath -ldflags="-s -w" -o trendradar ./cmd
 | GET | `/api/v1/system/config` | 当前配置（注意敏感信息暴露面） |
 | POST | `/api/v1/system/crawl` | 触发抓取 |
 | POST/GET | `/api/v1/storage/...` | 存储相关 |
-| GET/POST | `/mcp` | MCP HTTP 端点 |
+| POST/GET | `/api/v1/ai/chat` | AI 对话 |
+| GET/POST | `/mcp` | **MCP HTTP 端点**（JSON-RPC 2.0） |
+| GET/POST | `/static/*` | 静态文件（如配置了 web_root） |
 
-生产环境建议在网关层做 **鉴权、限流、TLS**，并视情况 **勿对外暴露** `/system/config` 等敏感接口。
+**安全建议：**
+- 生产环境建议启用 `server.auth.enabled: true`
+- 在网关层做 **鉴权、限流、TLS**
+- 视情况 **勿对外暴露** `/system/config` 等敏感接口
+- MCP 端点建议配置在内部网络或使用 API Key 保护
+
+**请求头：**
+- `X-API-Key` - API 认证密钥
+- `Authorization: Bearer <token>` - Bearer Token 认证
+- `X-Request-ID` - 请求追踪 ID
 
 ## 测试
 
+### 运行全部测试
 ```bash
 go test ./...
 ```
 
-## 相关文档
+### 运行指定模块测试
+```bash
+# URL 标准化测试
+go test ./internal/storage/... -v
+
+# 中间件测试（CORS、认证）
+go test ./internal/api/... -v
+```
+
+### 测试覆盖率
+```bash
+go test ./... -cover
+```
+
+### 测试用例统计
+| 模块 | 文件 | 用例数 |
+|------|------|--------|
+| URL 标准化 | `storage/news_storage_test.go` | 15+ |
+| CORS 中间件 | `api/middleware_test.go` | 4 |
+| 认证中间件 | `api/middleware_test.go` | 9 |
+| **总计** | - | **28+** |
+
+## 新增文档
 
 | 文件 | 内容 |
 |------|------|
+| `README.md`（本章） | **安全特性、MCP 协议、URL 标准化说明** |
 | `docs/ai-prompts-and-analysis.md` | AI 分析、提示词与流程说明 |
 | `docs/ai-filter-batching.md` | 兴趣过滤：分批、`max_input_chars`、批间隔与独立 `max_output_tokens` |
 | `docs/service-windows-linux.md` | **安装为系统服务**（`install` / `sc` / `systemd`、开机自启） |
 | `docs/email-dedup.md` | 邮件去重与指纹策略 |
+
+## 安全清单
+
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| CORS 中间件 | ✅ 已实现 | 支持自定义允许来源 |
+| API 认证 | ✅ 已实现 | 支持 API Key 和 Bearer Token |
+| 管理员权限 | ✅ 已实现 | 敏感操作需要 admin 角色 |
+| 配置脱敏 | ✅ 已实现 | API 返回时隐藏敏感字段 |
+| 日志脱敏 | ⚠️ 注意 | AI 请求日志包含完整请求体 |
+| 数据库加密 | ❌ 未实现 | 敏感数据建议加密存储 |
+| TLS/HTTPS | ❌ 未实现 | 生产环境建议使用反向代理 |
+| 请求限流 | ❌ 未实现 | 建议网关层实现 |
 
 ## 许可与上游
 

@@ -248,9 +248,136 @@ func (s *NewsStorage) GetTrendingTopics(topN int, mode string) ([]model.Topic, e
 	return nil, nil
 }
 
-// NormalizeURL 标准化 URL
+// NormalizeURL 标准化 URL，用于去重和比较
+// 移除跟踪参数、片段标识符、尾部斜杠等
 func NormalizeURL(url string) string {
-	// TODO: 实现 URL 标准化（移除动态参数等）
+	if url == "" {
+		return ""
+	}
+
+	// 1. 去除前后空白
+	url = strings.TrimSpace(url)
+
+	// 2. 转换为小写（统一大小写）
+	url = strings.ToLower(url)
+
+	// 3. 移除 URL 片段（# 后面的部分）
+	if idx := strings.Index(url, "#"); idx != -1 {
+		url = url[:idx]
+	}
+
+	// 4. 移除常见的跟踪参数
+	// 保留核心路径和必要参数
+	trackParams := []string{
+		"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+		"utm_id", "utm_referrer", "utm_source_platform", "utm_creative_format",
+		"share", "share_id", "share_token", "share_uid", "share_session",
+		"from", "source", "src", "ref", "referrer", "sid", "session_id",
+		"ts", "t", "d", "e", "i", "page", "position",
+		"click", "click_id", "clickid", "_bs", "aid", "bid", "cid",
+	}
+
+	// 5. 解析并过滤参数
+	if idx := strings.Index(url, "?"); idx != -1 {
+		baseURL := url[:idx]
+		queryParams := url[idx+1:]
+
+		// 分离参数
+		pairs := strings.Split(queryParams, "&")
+		var keptParams []string
+		for _, pair := range pairs {
+			if pair == "" {
+				continue
+			}
+			key := strings.SplitN(pair, "=", 2)[0]
+			isTrackParam := false
+			for _, trackParam := range trackParams {
+				if strings.HasPrefix(key, trackParam) {
+					isTrackParam = true
+					break
+				}
+			}
+			if !isTrackParam {
+				keptParams = append(keptParams, pair)
+			}
+		}
+
+		if len(keptParams) > 0 {
+			url = baseURL + "?" + strings.Join(keptParams, "&")
+		} else {
+			url = baseURL
+		}
+	}
+
+	// 6. 移除尾部斜杠（但保留根路径 /）
+	if len(url) > 1 && strings.HasSuffix(url, "/") {
+		url = strings.TrimSuffix(url, "/")
+	}
+
+	// 7. 规范化路径中的重复斜杠（保留 :// 协议前缀）
+	// 分离协议、路径和查询参数
+	protocol := ""
+	query := ""
+	if idx := strings.Index(url, "://"); idx != -1 {
+		protocol = url[:idx+3] // 包括 ://
+		url = url[idx+3:]
+	}
+	if idx := strings.Index(url, "?"); idx != -1 {
+		query = url[idx:]
+		url = url[:idx]
+	}
+
+	// 移除路径中的重复斜杠（/// → // → /）
+	for strings.Contains(url, "///") {
+		url = strings.ReplaceAll(url, "///", "//")
+	}
+	// 移除路径中多余的 //
+	for strings.Contains(url, "//") {
+		url = strings.ReplaceAll(url, "//", "/")
+	}
+
+	// 重新组合
+	if protocol != "" {
+		url = protocol + url
+	}
+	url += query
+
+	return url
+}
+
+// IsURLTracked 检查 URL 是否包含跟踪参数
+func IsURLTracked(url string) bool {
+	trackParams := []string{
+		"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+		"share", "share_id", "share_token", "ref", "referrer", "sid",
+	}
+
+	if idx := strings.Index(url, "?"); idx != -1 {
+		queryParams := url[idx+1:]
+		pairs := strings.Split(queryParams, "&")
+		for _, pair := range pairs {
+			if pair == "" {
+				continue
+			}
+			key := strings.SplitN(pair, "=", 2)[0]
+			for _, trackParam := range trackParams {
+				if strings.HasPrefix(key, trackParam) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ExtractBaseURL 提取 URL 的基础部分（不含参数）
+func ExtractBaseURL(url string) string {
+	if idx := strings.Index(url, "?"); idx != -1 {
+		return url[:idx]
+	}
+	if idx := strings.Index(url, "#"); idx != -1 {
+		return url[:idx]
+	}
 	return url
 }
 

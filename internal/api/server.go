@@ -53,8 +53,11 @@ func NewServer() *Server {
 	}))
 	router.Use(ginzap.RecoveryWithZap(zl, true))
 
-	// TODO: 添加 CORS 中间件
-	// TODO: 添加认证中间件
+	// 添加 CORS 中间件（从配置加载）
+	router.Use(NewCORS())
+
+	// 添加认证中间件（从配置加载）
+	router.Use(NewAuthMiddleware())
 
 	s := &Server{router: router}
 
