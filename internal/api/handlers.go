@@ -72,14 +72,18 @@ func GetLatestNews(c *gin.Context) {
 		crawlTimeStr = lastCrawl.Format(time.RFC3339)
 	}
 
+	// 跨平台合并相同新闻
+	mergedNews := storage.MergeCrossPlatform(results, idToName, 0.6)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"news":       results,
-			"id_to_name": idToName,
-			"failed_ids": []string{},
-			"crawl_time": crawlTimeStr,
-			"source":     "database",
+			"news":        results,
+			"merged_news": mergedNews,
+			"id_to_name":  idToName,
+			"failed_ids":  []string{},
+			"crawl_time":  crawlTimeStr,
+			"source":      "database",
 			"ai_analysis": gin.H{
 				"enabled": false,
 				"reason":  "read_only_from_database",

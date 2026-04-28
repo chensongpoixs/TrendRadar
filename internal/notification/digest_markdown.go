@@ -126,3 +126,80 @@ func mdEscapeURL(u string) string {
 	u = strings.ReplaceAll(u, ")", "%29")
 	return u
 }
+
+// BuildNewsDigestMarkdownMerged 跨平台合并后的 Markdown 摘要
+func BuildNewsDigestMarkdownMerged(
+	generatedAt time.Time,
+	platformCount, afterAICount, mailCount, mergedCount, emailSkipped, rssTotal int,
+	failedIDs []string,
+	filterMode string,
+	merged []model.MergedNewsItem,
+	crawlTime time.Time,
+) string {
+	var b strings.Builder
+	b.WriteString("# 趋势雷达 · 移动端行业快报\n\n")
+	b.WriteString("## 执行摘要\n\n")
+	b.WriteString(fmt.Sprintf("- **时间**: `%s`\n", generatedAt.Format(time.RFC3339)))
+	b.WriteString(fmt.Sprintf("- **平台数**: %d\n", platformCount))
+	b.WriteString(fmt.Sprintf("- **关注新闻（过滤后）**: %d 条\n", afterAICount))
+	b.WriteString(fmt.Sprintf("- **本批新推送**: %d 条\n", mailCount))
+	if mergedCount < mailCount {
+		b.WriteString(fmt.Sprintf("- **跨平台合并后**: %d 条\n", mergedCount))
+	}
+	if emailSkipped > 0 {
+		b.WriteString(fmt.Sprintf("- **去重说明**: 已排除历史已发送 %d 条\n", emailSkipped))
+	}
+	b.WriteString(fmt.Sprintf("- **RSS 条目**: %d\n", rssTotal))
+	failStr := "无"
+	if len(failedIDs) > 0 {
+		failStr = strings.Join(failedIDs, "、")
+	}
+	b.WriteString(fmt.Sprintf("- **失败平台**: %s\n", failStr))
+	b.WriteString(fmt.Sprintf("- **策略**: %s\n", mdEscapeLine(filterMode)))
+
+	b.WriteString("\n## 重点新闻 TOP\n\n")
+	b.WriteString(mdFormatNewsBriefMerged(merged, crawlTime))
+	return b.String()
+}
+
+func mdFormatNewsBriefMerged(merged []model.MergedNewsItem, fallback time.Time) string {
+	if len(merged) == 0 {
+		return "_暂无重点新闻_"
+	}
+	const maxItems = 20
+	var b strings.Builder
+	limit := len(merged)
+	if limit > maxItems {
+		limit = maxItems
+	}
+	for i := 0; i < limit; i++ {
+		item := merged[i]
+		title := strings.TrimSpace(item.Title)
+		rn := []rune(title)
+		if len(rn) > 80 {
+			title = string(rn[:80]) + "..."
+		}
+		link := strings.TrimSpace(item.URL)
+		if link == "" {
+			link = strings.TrimSpace(item.MobileURL)
+		}
+		itemTime := item.CrawlTime
+		if itemTime.IsZero() {
+			itemTime = fallback
+		}
+		// 来源标签
+		var sourceParts []string
+		for _, src := range item.Sources {
+			sourceParts = append(sourceParts, fmt.Sprintf("%s #%d", mdEscapeInline(src.SourceName), src.Rank))
+		}
+		sourceTag := strings.Join(sourceParts, " · ")
+		if link == "" {
+			b.WriteString(fmt.Sprintf("%d. **%s**  \n", i+1, mdEscapeInline(title)))
+			b.WriteString(fmt.Sprintf("   _%s_ · _%s_\n\n", sourceTag, itemTime.Format("15:04")))
+			continue
+		}
+		b.WriteString(fmt.Sprintf("%d. **%s**  \n", i+1, mdEscapeInline(title)))
+		b.WriteString(fmt.Sprintf("   _%s_ · _%s_ · [原文](%s)\n\n", sourceTag, itemTime.Format("15:04"), mdEscapeURL(link)))
+	}
+	return strings.TrimSpace(b.String())
+}

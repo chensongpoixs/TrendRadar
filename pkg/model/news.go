@@ -136,3 +136,22 @@ type SearchOptions struct {
 	SortBy      string // relevance, weight, date
 	Threshold   float64
 }
+
+// NewsSource 合并新闻的来源平台信息
+type NewsSource struct {
+	SourceID   string `json:"source_id"`
+	SourceName string `json:"source_name"`
+	Rank       int    `json:"rank"`
+	URL        string `json:"url"`
+}
+
+// MergedNewsItem 跨平台合并后的新闻条目
+type MergedNewsItem struct {
+	Title      string       `json:"title"`
+	URL        string       `json:"url"`
+	MobileURL  string       `json:"mobile_url"`
+	Sources    []NewsSource `json:"sources"`
+	MaxRank    int          `json:"max_rank"`
+	CrawlTime  time.Time    `json:"crawl_time"`
+	TotalCount int          `json:"total_count"`
+}
