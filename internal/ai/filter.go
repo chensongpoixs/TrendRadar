@@ -176,7 +176,7 @@ func (f *Filter) filterBatch(newsItems []NewsItem) ([]FilterResult, error) {
 	messages := []ChatMessage{
 		{
 			Role:    "system",
-			Content: "你是一个智能新闻过滤器。请严格只返回纯 JSON 数组，不要包含 markdown 标记、代码围栏或任何解释文字。",
+			Content: "你是科技产业信息过滤专家，服务于投资人、产品经理与技术决策者。你的任务是判断一条新闻标题是否对行业从业者有信息增量——区分「值得花时间深读的信号」与「泛娱乐/纯情绪/无信息量的噪声」。请严格只返回纯 JSON 数组，不要包含 markdown 标记、代码围栏或任何解释文字。",
 		},
 		{
 			Role:    "user",

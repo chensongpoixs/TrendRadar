@@ -122,6 +122,9 @@ func (s *Server) registerRoutes() {
 			storage.GET("/status", GetStorageStatus)
 			storage.GET("/dates", ListAvailableDates)
 		}
+
+		// 每日新闻导出（手动触发），POST body: {"date": "2026-04-28"}，留空为当天
+		v1.POST("/daily-export", PostDailyExport)
 	}
 
 	// MCP HTTP 端点

@@ -1373,6 +1373,42 @@ func ListAvailableDates(c *gin.Context) {
 	})
 }
 
+// PostDailyExport 手动触发每日新闻导出（推送到 ModelScope 数据集）
+func PostDailyExport(c *gin.Context) {
+	var body struct {
+		Date string `json:"date"` // 可选，格式 "2026-04-28"
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		body.Date = ""
+	}
+	if body.Date == "" {
+		cfg := config.Get()
+		loc := time.Local
+		if cfg != nil && cfg.App.Timezone != "" {
+			if l, err := time.LoadLocation(cfg.App.Timezone); err == nil {
+				loc = l
+			}
+		}
+		body.Date = time.Now().In(loc).Format("2006-01-02")
+	}
+
+	applog.WithComponent("api").Info("daily export triggered manually", zap.String("date", body.Date))
+
+	go func() {
+		if err := storage.RunDailyExport(body.Date); err != nil {
+			applog.WithComponent("api").Error("daily export failed", zap.Error(err), zap.String("date", body.Date))
+		}
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"success": true,
+		"data": gin.H{
+			"date":    body.Date,
+			"message": "导出任务已后台启动，请稍后查看仓库",
+		},
+	})
+}
+
 // MCPHandle MCP 协议处理
 func MCPHandle(c *gin.Context) {
 	// TODO: 实现 MCP 协议处理

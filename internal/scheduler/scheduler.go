@@ -51,6 +51,7 @@ func (s *Scheduler) Start() error {
 	// 根据预设配置定时任务
 	s.configureCronJobs()
 	s.addServerChanBatchJob()
+	s.addDailyExportJob()
 
 	// 启动 cron
 	s.cron.Start()
@@ -127,6 +128,27 @@ func (s *Scheduler) addServerChanBatchJob() {
 		return
 	}
 	logger.WithComponent("scheduler").Info("serverchan batch cron registered", zap.String("spec", spec))
+}
+
+// addDailyExportJob 每日新闻导出：按配置的 cron 定时推送到 ModelScope 数据集
+func (s *Scheduler) addDailyExportJob() {
+	cfg := config.Get()
+	if cfg == nil || !cfg.DailyExport.Enabled {
+		return
+	}
+	spec := strings.TrimSpace(cfg.DailyExport.Cron)
+	if spec == "" {
+		spec = "0 30 23 * * *"
+	}
+	if _, err := s.cron.AddFunc(spec, func() {
+		if err := storage.RunDailyExport(""); err != nil {
+			logger.WithComponent("scheduler").Error("daily export failed", zap.Error(err))
+		}
+	}); err != nil {
+		logger.WithComponent("scheduler").Error("add daily export cron failed", zap.String("spec", spec), zap.Error(err))
+		return
+	}
+	logger.WithComponent("scheduler").Info("daily export cron registered", zap.String("spec", spec))
 }
 
 // runCrawlTask 运行抓取任务

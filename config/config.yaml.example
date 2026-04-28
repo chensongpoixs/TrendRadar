@@ -147,6 +147,20 @@ storage:
     data_dir: "./data"
     retention_days: 30
 
+# 每日新闻导出：每天 23:30 将当日热榜快照生成目录结构并推送到 ModelScope 数据集仓库
+daily_export:
+  enabled: false
+  cron: "0 30 23 * * *"
+  output_dir: "./data/daily_export"
+  modelscope_repo: "chensongpoixs/daily_news_corpus"
+  modelscope_token: "" # 建议用环境变量 MODEL_SCOPE_TOKEN，空则从 env 取
+  git_user: "chensongpoixs"
+  git_email: "chensongpoixs@example.com"
+  fetch_content: true          # 是否抓取原文正文内容放入 markdown
+  max_fetch_concurrency: 5     # 并发抓取文章数
+
+
+  
 advanced:
   debug: false
   crawler:

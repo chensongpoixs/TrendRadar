@@ -27,6 +27,7 @@ type Config struct {
 	Notification  NotificationConfig
 	Storage       StorageConfig
 	Advanced      AdvancedConfig
+	DailyExport   DailyExportConfig `mapstructure:"daily_export"`
 }
 
 // AppConfig 应用配置
@@ -271,6 +272,19 @@ type RemoteConfig struct {
 	RetentionDays   int    `mapstructure:"retention_days"`
 }
 
+// DailyExportConfig 每日新闻导出配置（推送到 ModelScope 数据集仓库）
+type DailyExportConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	Cron                string `mapstructure:"cron"`             // 默认 "0 30 23 * * *"
+	OutputDir           string `mapstructure:"output_dir"`       // 默认 "./data/daily_export"
+	ModelScopeRepo      string `mapstructure:"modelscope_repo"`  // 如 "chensongpoixs/daily_news_corpus"
+	ModelScopeToken     string `mapstructure:"modelscope_token"` // 访问令牌（也可用环境变量 MODEL_SCOPE_TOKEN）
+	GitUser             string `mapstructure:"git_user"`
+	GitEmail            string `mapstructure:"git_email"`
+	FetchContent        bool   `mapstructure:"fetch_content"`         // 是否抓取原文正文内容
+	MaxFetchConcurrency int    `mapstructure:"max_fetch_concurrency"` // 并发抓取数，默认 5
+}
+
 // AdvancedConfig 高级配置
 type AdvancedConfig struct {
 	Debug        bool `mapstructure:"debug"`
@@ -448,6 +462,16 @@ func setDefaults() {
 	v.SetDefault("storage.formats.txt", false)
 	v.SetDefault("storage.local.data_dir", "./data")
 	v.SetDefault("storage.local.retention_days", 30)
+
+	v.SetDefault("daily_export.enabled", false)
+	v.SetDefault("daily_export.cron", "0 30 23 * * *")
+	v.SetDefault("daily_export.output_dir", "./data/daily_export")
+	v.SetDefault("daily_export.modelscope_repo", "chensongpoixs/daily_news_corpus")
+	v.SetDefault("daily_export.modelscope_token", "")
+	v.SetDefault("daily_export.git_user", "chensongpoixs")
+	v.SetDefault("daily_export.git_email", "chensongpoixs@example.com")
+	v.SetDefault("daily_export.fetch_content", true)
+	v.SetDefault("daily_export.max_fetch_concurrency", 5)
 
 	v.SetDefault("logging.enabled", true)
 	v.SetDefault("logging.level", "info")
