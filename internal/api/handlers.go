@@ -1431,19 +1431,82 @@ func PostDailyExport(c *gin.Context) {
 		body.Date = time.Now().In(loc).Format("2006-01-02")
 	}
 
-	applog.WithComponent("api").Info("daily export triggered manually", zap.String("date", body.Date))
+	// 验证日期格式
+	if !dateYMD.MatchString(body.Date) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "日期格式错误，请使用 YYYY-MM-DD 格式",
+		})
+		return
+	}
 
-	go func() {
-		if err := storage.RunDailyExport(body.Date); err != nil {
-			applog.WithComponent("api").Error("daily export failed", zap.Error(err), zap.String("date", body.Date))
+	// 检查配置
+	cfg := config.Get()
+	if cfg == nil || !cfg.DailyExport.Enabled {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "每日导出功能未启用，请在 config.yaml 中设置 daily_export.enabled: true",
+		})
+		return
+	}
+
+	// 快速检查当日是否有快照数据
+	ns := storage.NewNewsStorage()
+	summary, _, err := ns.GetSnapshotDaySummary(body.Date)
+	if err != nil {
+		applog.WithComponent("api").Error("check snapshot summary failed", zap.Error(err), zap.String("date", body.Date))
+	}
+	totalRows := int64(0)
+	if summary != nil {
+		for _, s := range summary {
+			totalRows += s.RowCount
 		}
-	}()
+	}
 
-	c.JSON(http.StatusAccepted, gin.H{
+	if totalRows == 0 {
+		// 也检查 news_items 表（兼容旧数据）
+		cfg2 := config.Get()
+		var platformIDs []string
+		for _, src := range cfg2.Platforms.Sources {
+			if src.Enabled {
+				platformIDs = append(platformIDs, src.ID)
+			}
+		}
+		newsMap, _ := ns.GetTodayNews(platformIDs, body.Date)
+		for _, items := range newsMap {
+			totalRows += int64(len(items))
+		}
+	}
+
+	if totalRows == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("%s 没有热榜快照数据，请确保调度器已抓取该日数据", body.Date),
+		})
+		return
+	}
+
+	applog.WithComponent("api").Info("daily export triggered manually",
+		zap.String("date", body.Date),
+		zap.Int64("total_rows", totalRows))
+
+	// 同步执行本地导出 + Git 推送（手动触发时直接等待结果）
+	exportErr := storage.RunDailyExport(body.Date)
+	if exportErr != nil {
+		applog.WithComponent("api").Error("daily export failed", zap.Error(exportErr), zap.String("date", body.Date))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("导出失败: %v", exportErr),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"date":    body.Date,
-			"message": "导出任务已后台启动，请稍后查看仓库",
+			"date":       body.Date,
+			"total_rows": totalRows,
+			"message":    fmt.Sprintf("%s 共 %d 条快照，已导出到本地并推送 ModelScope", body.Date, totalRows),
 		},
 	})
 }

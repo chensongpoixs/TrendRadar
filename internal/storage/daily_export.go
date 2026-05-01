@@ -47,7 +47,7 @@ func RunDailyExport(date string) error {
 	l.Info("daily export started")
 
 	// 1. 查询当日去重后的全量热榜快照
-	platforms, err := queryDailySnapshots(date)
+	platforms, err := QueryDailySnapshots(date)
 	if err != nil {
 		return fmt.Errorf("query snapshots: %w", err)
 	}
@@ -61,7 +61,7 @@ func RunDailyExport(date string) error {
 	}
 	l.Info("snapshots loaded", zap.Int("platforms", len(platforms)), zap.Int("total_news", totalNews))
 
-	// 2. 并发抓取所有文章正文
+	// 2. 并发抓取所有文章正文（手动触发时可跳过以加速）
 	fetchContent := cfg.DailyExport.FetchContent
 	concurrency := cfg.DailyExport.MaxFetchConcurrency
 	if concurrency <= 0 {
@@ -230,8 +230,8 @@ func checkUnfetchableURL(rawURL string) (reason string, skip bool) {
 	return "", false
 }
 
-// queryDailySnapshots 查询当日热榜快照，按平台分组并做 URL 去重（取 rank 最优）。
-func queryDailySnapshots(date string) (map[string][]model.HotlistSnapshot, error) {
+// QueryDailySnapshots 查询当日热榜快照，按平台分组并做 URL 去重（取 rank 最优）。
+func QueryDailySnapshots(date string) (map[string][]model.HotlistSnapshot, error) {
 	db := core.GetDB()
 	var raw []model.HotlistSnapshot
 	if err := db.Where("date_local = ?", date).Order("rank ASC, captured_at DESC").Find(&raw).Error; err != nil {
