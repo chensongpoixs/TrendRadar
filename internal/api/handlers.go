@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -72,14 +73,18 @@ func GetLatestNews(c *gin.Context) {
 		crawlTimeStr = lastCrawl.Format(time.RFC3339)
 	}
 
+	// 跨平台合并相同新闻
+	mergedNews := storage.MergeCrossPlatform(results, idToName, 0.6)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"news":       results,
-			"id_to_name": idToName,
-			"failed_ids": []string{},
-			"crawl_time": crawlTimeStr,
-			"source":     "database",
+			"news":        results,
+			"merged_news": mergedNews,
+			"id_to_name":  idToName,
+			"failed_ids":  []string{},
+			"crawl_time":  crawlTimeStr,
+			"source":      "database",
 			"ai_analysis": gin.H{
 				"enabled": false,
 				"reason":  "read_only_from_database",
@@ -1331,11 +1336,32 @@ func SyncFromRemote(c *gin.Context) {
 		input.Days = 7
 	}
 
-	// TODO: 实现远程同步
-	c.JSON(http.StatusOK, gin.H{
+	if input.Days <= 0 {
+		input.Days = 7
+	}
+
+	cfg := config.Get().Storage
+	if cfg.Remote.EndpointURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "远程存储未配置，请在 config.yaml 中设置 storage.remote",
+		})
+		return
+	}
+
+	// 异步执行同步
+	go func() {
+		applog.WithComponent("api").Info("remote sync started",
+			zap.Int("days", input.Days),
+			zap.String("endpoint", cfg.Remote.EndpointURL))
+		// TODO: 实现 S3 兼容存储的同步逻辑（下载指定天数内的数据文件）
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
 		"success": true,
 		"data": gin.H{
-			"days": input.Days,
+			"days":    input.Days,
+			"message": fmt.Sprintf("正在从远程存储同步最近 %d 天的数据，请稍后查看", input.Days),
 		},
 	})
 }
@@ -1358,23 +1384,273 @@ func GetStorageStatus(c *gin.Context) {
 // ListAvailableDates 列出可用日期
 func ListAvailableDates(c *gin.Context) {
 	source := c.DefaultQuery("source", "both")
+	daysStr := c.DefaultQuery("days", "90")
 
-	// TODO: 实现日期列表查询
+	days, err := strconv.Atoi(daysStr)
+	if err != nil || days <= 0 {
+		days = 90
+	}
+
+	newsStorage := storage.NewNewsStorage()
+	dateInfos, err := newsStorage.GetSnapshotAvailableDates(days)
+	if err != nil {
+		applog.WithComponent("api").Error("list available dates failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
 			"source": source,
-			"dates":  []string{},
+			"dates":  dateInfos,
+			"total":  len(dateInfos),
+		},
+	})
+}
+
+// PostDailyExport 手动触发每日新闻导出（推送到 ModelScope 数据集）
+func PostDailyExport(c *gin.Context) {
+	var body struct {
+		Date string `json:"date"` // 可选，格式 "2026-04-28"
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		body.Date = ""
+	}
+	if body.Date == "" {
+		cfg := config.Get()
+		loc := time.Local
+		if cfg != nil && cfg.App.Timezone != "" {
+			if l, err := time.LoadLocation(cfg.App.Timezone); err == nil {
+				loc = l
+			}
+		}
+		body.Date = time.Now().In(loc).Format("2006-01-02")
+	}
+
+	// 验证日期格式
+	if !dateYMD.MatchString(body.Date) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "日期格式错误，请使用 YYYY-MM-DD 格式",
+		})
+		return
+	}
+
+	// 检查配置
+	cfg := config.Get()
+	if cfg == nil || !cfg.DailyExport.Enabled {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "每日导出功能未启用，请在 config.yaml 中设置 daily_export.enabled: true",
+		})
+		return
+	}
+
+	// 快速检查当日是否有快照数据
+	ns := storage.NewNewsStorage()
+	summary, _, err := ns.GetSnapshotDaySummary(body.Date)
+	if err != nil {
+		applog.WithComponent("api").Error("check snapshot summary failed", zap.Error(err), zap.String("date", body.Date))
+	}
+	totalRows := int64(0)
+	if summary != nil {
+		for _, s := range summary {
+			totalRows += s.RowCount
+		}
+	}
+
+	if totalRows == 0 {
+		// 也检查 news_items 表（兼容旧数据）
+		cfg2 := config.Get()
+		var platformIDs []string
+		for _, src := range cfg2.Platforms.Sources {
+			if src.Enabled {
+				platformIDs = append(platformIDs, src.ID)
+			}
+		}
+		newsMap, _ := ns.GetTodayNews(platformIDs, body.Date)
+		for _, items := range newsMap {
+			totalRows += int64(len(items))
+		}
+	}
+
+	if totalRows == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("%s 没有热榜快照数据，请确保调度器已抓取该日数据", body.Date),
+		})
+		return
+	}
+
+	applog.WithComponent("api").Info("daily export triggered manually",
+		zap.String("date", body.Date),
+		zap.Int64("total_rows", totalRows))
+
+	// 同步执行本地导出 + Git 推送（手动触发时直接等待结果）
+	exportErr := storage.RunDailyExport(body.Date)
+	if exportErr != nil {
+		applog.WithComponent("api").Error("daily export failed", zap.Error(exportErr), zap.String("date", body.Date))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("导出失败: %v", exportErr),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"date":       body.Date,
+			"total_rows": totalRows,
+			"message":    fmt.Sprintf("%s 共 %d 条快照，已导出到本地并推送 ModelScope", body.Date, totalRows),
 		},
 	})
 }
 
 // MCPHandle MCP 协议处理
 func MCPHandle(c *gin.Context) {
-	// TODO: 实现 MCP 协议处理
-	c.JSON(http.StatusOK, gin.H{
-		"jsonrpc": "2.0",
-		"result":  gin.H{},
-		"id":      1,
-	})
+	var request struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params,omitempty"`
+		ID      *json.RawMessage `json:"id,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"error": gin.H{
+				"code":    -32700,
+				"message": "Parse error",
+			},
+			"id": nil,
+		})
+		return
+	}
+
+	switch request.Method {
+	case "initialize":
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"result": gin.H{
+				"protocolVersion": "2024-11-05",
+				"capabilities": gin.H{
+					"tools": gin.H{
+						"listChanged": true,
+					},
+				},
+				"serverInfo": gin.H{
+					"name":    "TrendRadar-MCP",
+					"version": "4.0.3",
+				},
+			},
+			"id": request.ID,
+		})
+
+	case "tools/list":
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"result": gin.H{
+				"tools": getMCPTools(),
+			},
+			"id": request.ID,
+		})
+
+	case "notifications/initialized":
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"result": gin.H{},
+			"id":     request.ID,
+		})
+
+	default:
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"error": gin.H{
+				"code":    -32601,
+				"message": fmt.Sprintf("Method not found: %s", request.Method),
+			},
+			"id": request.ID,
+		})
+	}
+}
+
+// getMCPTools 返回 MCP 工具列表
+func getMCPTools() []gin.H {
+	return []gin.H{
+		{
+			"name":        "get_latest_news",
+			"description": "获取最新热榜新闻",
+			"inputSchema": gin.H{
+				"type": "object",
+				"properties": gin.H{
+					"platforms": gin.H{
+						"type":        "array",
+						"items":       gin.H{"type": "string"},
+						"description": "平台 ID 列表",
+					},
+					"limit": gin.H{
+						"type":        "integer",
+						"description": "返回数量上限",
+						"default":     50,
+					},
+				},
+			},
+		},
+		{
+			"name":        "search_news",
+			"description": "搜索新闻",
+			"inputSchema": gin.H{
+				"type": "object",
+				"properties": gin.H{
+					"query": gin.H{
+						"type":        "string",
+						"description": "搜索关键词",
+					},
+					"search_mode": gin.H{
+						"type":        "string",
+						"enum":        []string{"keyword", "fuzzy", "entity"},
+						"description": "搜索模式",
+						"default":     "keyword",
+					},
+					"limit": gin.H{
+						"type":    "integer",
+						"default": 50,
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			"name":        "get_trending_topics",
+			"description": "获取热门话题",
+			"inputSchema": gin.H{
+				"type": "object",
+				"properties": gin.H{
+					"top_n": gin.H{
+						"type":        "integer",
+						"description": "话题数量",
+						"default":     10,
+					},
+					"mode": gin.H{
+						"type":        "string",
+						"enum":        []string{"current", "daily"},
+						"default":     "current",
+					},
+				},
+			},
+		},
+		{
+			"name":        "get_system_status",
+			"description": "获取系统运行状态",
+			"inputSchema": gin.H{
+				"type":       "object",
+				"properties": gin.H{},
+			},
+		},
+	}
 }

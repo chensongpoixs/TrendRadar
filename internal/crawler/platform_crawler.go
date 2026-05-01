@@ -51,7 +51,7 @@ func NewPlatformCrawler() *PlatformCrawler {
 }
 
 // FetchData 获取单个平台数据
-func (c *PlatformCrawler) FetchData(platformID string) ([]model.NewsItem, error) {
+func (c *PlatformCrawler) FetchData(platformID string, platformName string) ([]model.NewsItem, error) {
 	url := fmt.Sprintf("https://newsnow.busiyi.world/api/s?id=%s&latest", platformID)
 	lg := logger.WithComponent("crawler")
 	lg.Debug("hotlist fetch start", zap.String("platform_id", platformID), zap.String("url", url))
@@ -61,7 +61,7 @@ func (c *PlatformCrawler) FetchData(platformID string) ([]model.NewsItem, error)
 
 	// 重试逻辑
 	for attempt := 1; attempt <= 3; attempt++ {
-		items, lastError = c.fetchWithRetry(url, platformID)
+		items, lastError = c.fetchWithRetry(url, platformID, platformName)
 		if lastError == nil {
 			break
 		}
@@ -80,7 +80,7 @@ func (c *PlatformCrawler) FetchData(platformID string) ([]model.NewsItem, error)
 }
 
 // fetchWithRetry 执行实际抓取
-func (c *PlatformCrawler) fetchWithRetry(url, platformID string) ([]model.NewsItem, error) {
+func (c *PlatformCrawler) fetchWithRetry(url, platformID, platformName string) ([]model.NewsItem, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -131,6 +131,7 @@ func (c *PlatformCrawler) fetchWithRetry(url, platformID string) ([]model.NewsIt
 			Title:      item.Title,
 			SourceID:   platformID,
 			Rank:       i + 1,
+			SourceName: platformName,
 			URL:        item.URL,
 			MobileURL:  item.MobileURL,
 			CrawlTime:  time.Now(),
@@ -164,7 +165,7 @@ func (c *PlatformCrawler) CrawlAll() (map[string][]model.NewsItem, map[string]st
 			sem <- struct{}{} // 获取信号量
 			defer func() { <-sem }() // 释放信号量
 
-			items, err := c.FetchData(platformID)
+			items, err := c.FetchData(platformID, platformName)
 			if err != nil {
 				mu.Lock()
 				failedIDs = append(failedIDs, platformID)

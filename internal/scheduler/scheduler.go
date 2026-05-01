@@ -51,6 +51,7 @@ func (s *Scheduler) Start() error {
 	// 根据预设配置定时任务
 	s.configureCronJobs()
 	s.addServerChanBatchJob()
+	s.addDailyExportJob()
 
 	// 启动 cron
 	s.cron.Start()
@@ -127,6 +128,27 @@ func (s *Scheduler) addServerChanBatchJob() {
 		return
 	}
 	logger.WithComponent("scheduler").Info("serverchan batch cron registered", zap.String("spec", spec))
+}
+
+// addDailyExportJob 每日新闻导出：按配置的 cron 定时推送到 ModelScope 数据集
+func (s *Scheduler) addDailyExportJob() {
+	cfg := config.Get()
+	if cfg == nil || !cfg.DailyExport.Enabled {
+		return
+	}
+	spec := strings.TrimSpace(cfg.DailyExport.Cron)
+	if spec == "" {
+		spec = "0 30 23 * * *"
+	}
+	if _, err := s.cron.AddFunc(spec, func() {
+		if err := storage.RunDailyExport(""); err != nil {
+			logger.WithComponent("scheduler").Error("daily export failed", zap.Error(err))
+		}
+	}); err != nil {
+		logger.WithComponent("scheduler").Error("add daily export cron failed", zap.String("spec", spec), zap.Error(err))
+		return
+	}
+	logger.WithComponent("scheduler").Info("daily export cron registered", zap.String("spec", spec))
 }
 
 // runCrawlTask 运行抓取任务
@@ -235,9 +257,15 @@ func runCrawlAnalyzeAndNotify() error {
 	for _, items := range emailResults {
 		mailCount += len(items)
 	}
+	// 跨平台合并相同/高度相似新闻
+	mergedNews := storage.MergeCrossPlatform(emailResults, idToName, 0.6)
+	mergedCount := len(mergedNews)
 	dedupLine := ""
 	if emailSkipped > 0 {
 		dedupLine = fmt.Sprintf("\n邮件去重: 已排除历史已发送 %d 条", emailSkipped)
+	}
+	if mergedCount < mailCount {
+		dedupLine += fmt.Sprintf("\n跨平台合并: %d → %d 条", mailCount, mergedCount)
 	}
 
 	plainReport := fmt.Sprintf(
@@ -251,21 +279,21 @@ func runCrawlAnalyzeAndNotify() error {
 		failedIDs,
 		filterMode,
 		formatPlatformCoverage(emailResults, idToName),
-		formatMobileNewsBrief(emailResults, idToName, crawlTime),
+		formatMobileNewsBriefMerged(mergedNews, crawlTime),
 	)
-	report := formatEmailHTML(emailResults, idToName, crawlTime, mailCount, rssTotal, failedIDs, filterMode, emailSkipped)
+	report := formatEmailHTMLMerged(mergedNews, crawlTime, mailCount, mergedCount, rssTotal, failedIDs, filterMode, emailSkipped)
 	// 与邮件同构的 Markdown，专供微信 Server 酱（desp）
-	mdReport := notification.BuildNewsDigestMarkdown(
+	mdReport := notification.BuildNewsDigestMarkdownMerged(
 		time.Now(),
 		len(results),
 		afterAICount,
 		mailCount,
+		mergedCount,
 		emailSkipped,
 		rssTotal,
 		failedIDs,
 		filterMode,
-		emailResults,
-		idToName,
+		mergedNews,
 		crawlTime,
 	)
 
@@ -387,60 +415,65 @@ func formatPlatformCoverage(results map[string][]model.NewsItem, idToName map[st
 	return strings.TrimSpace(b.String())
 }
 
-func formatMobileNewsBrief(results map[string][]model.NewsItem, idToName map[string]string, fallbackTime time.Time) string {
-	if len(results) == 0 {
+// formatMobileNewsBriefMerged 跨平台合并后的纯文本摘要
+func formatMobileNewsBriefMerged(merged []model.MergedNewsItem, fallbackTime time.Time) string {
+	if len(merged) == 0 {
 		return "无重点新闻"
 	}
 
-	const maxPerPlatform = 5
+	const maxItems = 20
 	var b strings.Builder
-	for platformID, items := range results {
-		if len(items) == 0 {
-			continue
+	limit := len(merged)
+	if limit > maxItems {
+		limit = maxItems
+	}
+	for i := 0; i < limit; i++ {
+		item := merged[i]
+		title := strings.TrimSpace(item.Title)
+		if len([]rune(title)) > 46 {
+			runes := []rune(title)
+			title = string(runes[:46]) + "..."
 		}
-		platformName := idToName[platformID]
-		if strings.TrimSpace(platformName) == "" {
-			platformName = platformID
+		link := strings.TrimSpace(item.URL)
+		if link == "" {
+			link = strings.TrimSpace(item.MobileURL)
 		}
-		b.WriteString(fmt.Sprintf("\n%s\n", platformName))
+		if link == "" {
+			link = "无链接"
+		}
 
-		limit := len(items)
-		if limit > maxPerPlatform {
-			limit = maxPerPlatform
+		itemTime := item.CrawlTime
+		if itemTime.IsZero() {
+			itemTime = fallbackTime
 		}
-		for i := 0; i < limit; i++ {
-			item := items[i]
-			title := strings.TrimSpace(item.Title)
-			if len([]rune(title)) > 46 {
-				runes := []rune(title)
-				title = string(runes[:46]) + "..."
-			}
-			link := strings.TrimSpace(item.URL)
-			if link == "" {
-				link = strings.TrimSpace(item.MobileURL)
-			}
-			if link == "" {
-				link = "无链接"
-			}
 
-			itemTime := item.CrawlTime
-			if itemTime.IsZero() {
-				itemTime = fallbackTime
-			}
-			b.WriteString(fmt.Sprintf("%d) %s\n", i+1, title))
-			b.WriteString(fmt.Sprintf("   %s | %s\n", itemTime.Format("15:04"), link))
-		}
+		// 来源标签
+		sourceTags := formatSourceTags(item.Sources)
+
+		b.WriteString(fmt.Sprintf("%d) %s\n", i+1, title))
+		b.WriteString(fmt.Sprintf("   %s %s | %s\n", sourceTags, itemTime.Format("15:04"), link))
 	}
 	return strings.TrimSpace(b.String())
 }
 
-func formatEmailHTML(results map[string][]model.NewsItem, idToName map[string]string, fallbackTime time.Time, totalCount, rssTotal int, failedIDs []string, filterMode string, dedupSkipped int) string {
+func formatSourceTags(sources []model.NewsSource) string {
+	var tags []string
+	for _, s := range sources {
+		tags = append(tags, fmt.Sprintf("[%s #%d]", s.SourceName, s.Rank))
+	}
+	return strings.Join(tags, "")
+}
+
+func formatEmailHTMLMerged(merged []model.MergedNewsItem, fallbackTime time.Time, totalCount, mergedCount, rssTotal int, failedIDs []string, filterMode string, dedupSkipped int) string {
 	var b strings.Builder
 	b.WriteString(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">`)
-	b.WriteString(`<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fb;margin:0;padding:12px;color:#111827}.wrap{max-width:760px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb}.hero{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:20px}.title{font-size:24px;font-weight:700}.meta{display:flex;gap:24px;flex-wrap:wrap;margin-top:14px;font-size:13px}.section{padding:14px 16px;border-top:1px solid #eef2f7}.h{font-size:15px;font-weight:700;margin:0 0 10px}.platform{margin:10px 0 4px;font-weight:700;color:#374151}.item{padding:10px 0;border-top:1px dashed #e5e7eb}.item:first-child{border-top:none}.t{font-size:14px;line-height:1.5}.m{font-size:12px;color:#6b7280;margin-top:4px}.a{color:#2563eb;text-decoration:none;word-break:break-all}.foot{padding:14px 16px;color:#6b7280;font-size:12px;text-align:center}</style></head><body><div class="wrap">`)
+	b.WriteString(`<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fb;margin:0;padding:12px;color:#111827}.wrap{max-width:760px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb}.hero{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;padding:20px}.title{font-size:24px;font-weight:700}.meta{display:flex;gap:24px;flex-wrap:wrap;margin-top:14px;font-size:13px}.section{padding:14px 16px;border-top:1px solid #eef2f7}.h{font-size:15px;font-weight:700;margin:0 0 10px}.item{padding:10px 0;border-top:1px dashed #e5e7eb}.item:first-child{border-top:none}.t{font-size:14px;line-height:1.5}.m{font-size:12px;color:#6b7280;margin-top:4px}.a{color:#2563eb;text-decoration:none;word-break:break-all}.stag{display:inline-block;background:#eef2ff;color:#4338ca;padding:1px 6px;border-radius:4px;margin-right:4px;font-size:11px;white-space:nowrap}.stag-multi{background:#fef3c7;color:#92400e}.foot{padding:14px 16px;color:#6b7280;font-size:12px;text-align:center}</style></head><body><div class="wrap">`)
 	b.WriteString(`<div class="hero"><div class="title">热点新闻分析</div>`)
 	b.WriteString(`<div class="meta">`)
 	b.WriteString(fmt.Sprintf(`<div><div>本批新内容</div><strong>%d 条</strong></div>`, totalCount))
+	if mergedCount < totalCount {
+		b.WriteString(fmt.Sprintf(`<div><div>跨平台合并后</div><strong>%d 条</strong></div>`, mergedCount))
+	}
 	b.WriteString(fmt.Sprintf(`<div><div>RSS</div><strong>%d 条</strong></div>`, rssTotal))
 	b.WriteString(fmt.Sprintf(`<div><div>生成时间</div><strong>%s</strong></div>`, html.EscapeString(time.Now().Format("01-02 15:04"))))
 	b.WriteString(`</div></div>`)
@@ -448,41 +481,44 @@ func formatEmailHTML(results map[string][]model.NewsItem, idToName map[string]st
 	if dedupSkipped > 0 {
 		b.WriteString(`<p style="margin:6px 0 0;font-size:12px;color:#1d4ed8">本小时已去重，未重复发送历史已推送 ` + fmt.Sprintf("%d", dedupSkipped) + ` 条</p>`)
 	}
+	if mergedCount < totalCount {
+		b.WriteString(`<p style="margin:6px 0 0;font-size:12px;color:#7c3aed">跨平台合并：` + fmt.Sprintf("%d → %d", totalCount, mergedCount) + ` 条（相同新闻已合并来源）</p>`)
+	}
 	if len(failedIDs) > 0 {
 		b.WriteString(`<p style="margin:6px 0 0;font-size:12px;color:#b91c1c">失败平台：` + html.EscapeString(strings.Join(failedIDs, ",")) + `</p>`)
 	}
 	b.WriteString(`</div><div class="section"><h3 class="h">重点新闻</h3>`)
 
-	const maxPerPlatform = 8
-	for platformID, items := range results {
-		if len(items) == 0 {
-			continue
+	const maxItems = 25
+	limit := len(merged)
+	if limit > maxItems {
+		limit = maxItems
+	}
+	for i := 0; i < limit; i++ {
+		item := merged[i]
+		link := strings.TrimSpace(item.URL)
+		if link == "" {
+			link = strings.TrimSpace(item.MobileURL)
 		}
-		name := idToName[platformID]
-		if strings.TrimSpace(name) == "" {
-			name = platformID
+		if link == "" {
+			link = "#"
 		}
-		b.WriteString(`<div class="platform">` + html.EscapeString(name) + `（` + fmt.Sprintf("%d", len(items)) + `条）</div>`)
-		limit := len(items)
-		if limit > maxPerPlatform {
-			limit = maxPerPlatform
+		itemTime := item.CrawlTime
+		if itemTime.IsZero() {
+			itemTime = fallbackTime
 		}
-		for i := 0; i < limit; i++ {
-			item := items[i]
-			link := strings.TrimSpace(item.URL)
-			if link == "" {
-				link = strings.TrimSpace(item.MobileURL)
+		b.WriteString(`<div class="item"><div class="t">` + fmt.Sprintf("%d. ", i+1) + html.EscapeString(strings.TrimSpace(item.Title)) + `</div>`)
+		b.WriteString(`<div class="m">`)
+		// 来源标签
+		for j, src := range item.Sources {
+			stagClass := "stag"
+			if len(item.Sources) > 1 {
+				stagClass += " stag-multi"
 			}
-			if link == "" {
-				link = "#"
-			}
-			itemTime := item.CrawlTime
-			if itemTime.IsZero() {
-				itemTime = fallbackTime
-			}
-			b.WriteString(`<div class="item"><div class="t">` + fmt.Sprintf("%d. ", i+1) + html.EscapeString(strings.TrimSpace(item.Title)) + `</div>`)
-			b.WriteString(`<div class="m">` + html.EscapeString(itemTime.Format("15:04")) + ` · <a class="a" href="` + html.EscapeString(link) + `" target="_blank">查看原文</a></div></div>`)
+			b.WriteString(fmt.Sprintf(`<span class="%s">%s #%d</span>`, stagClass, html.EscapeString(src.SourceName), src.Rank))
+			_ = j
 		}
+		b.WriteString(` ` + html.EscapeString(itemTime.Format("15:04")) + ` · <a class="a" href="` + html.EscapeString(link) + `" target="_blank">查看原文</a></div></div>`)
 	}
 	b.WriteString(`</div><div class="foot">由 趋势雷达 生成 · GitHub 开源项目</div></div></body></html>`)
 	return b.String()

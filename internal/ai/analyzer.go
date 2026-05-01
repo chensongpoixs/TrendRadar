@@ -70,8 +70,13 @@ func (a *Analyzer) Analyze(config *AnalysisConfig, newsByPlatform map[string][]N
 		}
 	}
 
-	systemPrompt := `你是一个专业的新闻分析专家。请严格只返回纯 JSON 对象，不要包含 markdown 标记、代码围栏或任何解释文字。` +
-		`请从多个角度分析新闻趋势、热点话题、情感倾向等。`
+	systemPrompt := `你是资深科技产业与一二级投研背景的行业研究专家。你的分析面向投资人、创业者、产品经理与企业战略决策者，需要兼顾产业深度与商业落地性。` +
+		`请严格只返回纯 JSON 对象，不要包含 markdown 标记、代码围栏或任何解释文字。` +
+		`分析时遵循以下原则：` +
+		`1) 产业链视角：将碎片化新闻串联为产业上下游信号，识别关键技术路线、竞争格局变化与供应链动向；` +
+		`2) 资本敏感度：关注投融资/并购/IPO/政策变动对赛道估值的影响，区分"情绪炒作"与"基本面变化"；` +
+		`3) 可执行洞察：输出的结论应指向"下一步可以做什么"——关注什么赛道、跟踪什么公司、学习什么技术；` +
+		`4) 风险辨识：识别过度炒作、政策风险、技术成熟度陷阱等潜在利空。`
 
 	// 构建用户提示词
 	var userPrompt strings.Builder
@@ -118,7 +123,7 @@ func (a *Analyzer) AnalyzeSentiment(text string) (SentimentResult, error) {
 	messages := []ChatMessage{
 		{
 			Role:    "system",
-			Content: "你是一个情感分析专家。请严格只返回纯 JSON，不要包含 markdown 或解释文字。",
+			Content: "你是行业舆论分析专家，擅长从市场情绪中识别过度乐观/恐慌信号与认知偏差。请严格只返回纯 JSON，不要包含 markdown 或解释文字。",
 		},
 		{
 			Role:    "user",
