@@ -108,6 +108,7 @@ func (s *Server) registerRoutes() {
 			analytics.POST("/topic/trend", AnalyzeTopicTrend)
 			analytics.POST("/sentiment", AnalyzeSentiment)
 			analytics.POST("/aggregate", AggregateNews)
+				analytics.POST("/compare-periods", ComparePeriods)
 		}
 
 		// 系统

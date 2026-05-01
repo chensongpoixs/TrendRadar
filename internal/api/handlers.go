@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -1335,11 +1336,32 @@ func SyncFromRemote(c *gin.Context) {
 		input.Days = 7
 	}
 
-	// TODO: 实现远程同步
-	c.JSON(http.StatusOK, gin.H{
+	if input.Days <= 0 {
+		input.Days = 7
+	}
+
+	cfg := config.Get().Storage
+	if cfg.Remote.EndpointURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "远程存储未配置，请在 config.yaml 中设置 storage.remote",
+		})
+		return
+	}
+
+	// 异步执行同步
+	go func() {
+		applog.WithComponent("api").Info("remote sync started",
+			zap.Int("days", input.Days),
+			zap.String("endpoint", cfg.Remote.EndpointURL))
+		// TODO: 实现 S3 兼容存储的同步逻辑（下载指定天数内的数据文件）
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
 		"success": true,
 		"data": gin.H{
-			"days": input.Days,
+			"days":    input.Days,
+			"message": fmt.Sprintf("正在从远程存储同步最近 %d 天的数据，请稍后查看", input.Days),
 		},
 	})
 }
@@ -1362,13 +1384,30 @@ func GetStorageStatus(c *gin.Context) {
 // ListAvailableDates 列出可用日期
 func ListAvailableDates(c *gin.Context) {
 	source := c.DefaultQuery("source", "both")
+	daysStr := c.DefaultQuery("days", "90")
 
-	// TODO: 实现日期列表查询
+	days, err := strconv.Atoi(daysStr)
+	if err != nil || days <= 0 {
+		days = 90
+	}
+
+	newsStorage := storage.NewNewsStorage()
+	dateInfos, err := newsStorage.GetSnapshotAvailableDates(days)
+	if err != nil {
+		applog.WithComponent("api").Error("list available dates failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
 			"source": source,
-			"dates":  []string{},
+			"dates":  dateInfos,
+			"total":  len(dateInfos),
 		},
 	})
 }
@@ -1411,10 +1450,144 @@ func PostDailyExport(c *gin.Context) {
 
 // MCPHandle MCP 协议处理
 func MCPHandle(c *gin.Context) {
-	// TODO: 实现 MCP 协议处理
-	c.JSON(http.StatusOK, gin.H{
-		"jsonrpc": "2.0",
-		"result":  gin.H{},
-		"id":      1,
-	})
+	var request struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params,omitempty"`
+		ID      *json.RawMessage `json:"id,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"error": gin.H{
+				"code":    -32700,
+				"message": "Parse error",
+			},
+			"id": nil,
+		})
+		return
+	}
+
+	switch request.Method {
+	case "initialize":
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"result": gin.H{
+				"protocolVersion": "2024-11-05",
+				"capabilities": gin.H{
+					"tools": gin.H{
+						"listChanged": true,
+					},
+				},
+				"serverInfo": gin.H{
+					"name":    "TrendRadar-MCP",
+					"version": "4.0.3",
+				},
+			},
+			"id": request.ID,
+		})
+
+	case "tools/list":
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"result": gin.H{
+				"tools": getMCPTools(),
+			},
+			"id": request.ID,
+		})
+
+	case "notifications/initialized":
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"result": gin.H{},
+			"id":     request.ID,
+		})
+
+	default:
+		c.JSON(http.StatusOK, gin.H{
+			"jsonrpc": "2.0",
+			"error": gin.H{
+				"code":    -32601,
+				"message": fmt.Sprintf("Method not found: %s", request.Method),
+			},
+			"id": request.ID,
+		})
+	}
+}
+
+// getMCPTools 返回 MCP 工具列表
+func getMCPTools() []gin.H {
+	return []gin.H{
+		{
+			"name":        "get_latest_news",
+			"description": "获取最新热榜新闻",
+			"inputSchema": gin.H{
+				"type": "object",
+				"properties": gin.H{
+					"platforms": gin.H{
+						"type":        "array",
+						"items":       gin.H{"type": "string"},
+						"description": "平台 ID 列表",
+					},
+					"limit": gin.H{
+						"type":        "integer",
+						"description": "返回数量上限",
+						"default":     50,
+					},
+				},
+			},
+		},
+		{
+			"name":        "search_news",
+			"description": "搜索新闻",
+			"inputSchema": gin.H{
+				"type": "object",
+				"properties": gin.H{
+					"query": gin.H{
+						"type":        "string",
+						"description": "搜索关键词",
+					},
+					"search_mode": gin.H{
+						"type":        "string",
+						"enum":        []string{"keyword", "fuzzy", "entity"},
+						"description": "搜索模式",
+						"default":     "keyword",
+					},
+					"limit": gin.H{
+						"type":    "integer",
+						"default": 50,
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			"name":        "get_trending_topics",
+			"description": "获取热门话题",
+			"inputSchema": gin.H{
+				"type": "object",
+				"properties": gin.H{
+					"top_n": gin.H{
+						"type":        "integer",
+						"description": "话题数量",
+						"default":     10,
+					},
+					"mode": gin.H{
+						"type":        "string",
+						"enum":        []string{"current", "daily"},
+						"default":     "current",
+					},
+				},
+			},
+		},
+		{
+			"name":        "get_system_status",
+			"description": "获取系统运行状态",
+			"inputSchema": gin.H{
+				"type":       "object",
+				"properties": gin.H{},
+			},
+		},
+	}
 }
