@@ -44,22 +44,24 @@ func RunDailyExport(date string) error {
 	ymd := strings.ReplaceAll(date, "-", "")
 
 	l := applog.WithComponent("daily_export").With(zap.String("date", date), zap.String("ymd", ymd))
-	l.Info("daily export started")
+	l.Info("[Step 1/5] Daily export started ==========")
 
 	// 1. 查询当日去重后的全量热榜快照
 	platforms, err := QueryDailySnapshots(date)
 	if err != nil {
+		l.Error("[Step 1/5] Query snapshots failed", zap.Error(err))
 		return fmt.Errorf("query snapshots: %w", err)
 	}
 	if len(platforms) == 0 {
-		l.Warn("no hotlist snapshots for this date, skip export")
+		l.Warn("[Step 1/5] No hotlist snapshots for this date, skip export")
 		return nil
 	}
 	totalNews := 0
-	for _, items := range platforms {
+	for pid, items := range platforms {
 		totalNews += len(items)
+		l.Info("  Platform snapshot stats", zap.String("platform", pid), zap.Int("count", len(items)))
 	}
-	l.Info("snapshots loaded", zap.Int("platforms", len(platforms)), zap.Int("total_news", totalNews))
+	l.Info(fmt.Sprintf("[Step 1/5] Snapshots loaded: %d platforms, %d deduplicated news items", len(platforms), totalNews))
 
 	// 2. 并发抓取所有文章正文（手动触发时可跳过以加速）
 	fetchContent := cfg.DailyExport.FetchContent
@@ -67,17 +69,23 @@ func RunDailyExport(date string) error {
 	if concurrency <= 0 {
 		concurrency = 5
 	}
+	l.Info(fmt.Sprintf("[Step 2/5] Fetch article content: enabled=%v, concurrency=%d", fetchContent, concurrency))
 	enriched := enrichAllPlatforms(platforms, fetchContent, concurrency, l)
+	l.Info("[Step 2/5] Article content fetch completed")
 
 	// 3. 尝试获取当日行业 AI 研报
+	l.Info("[Step 3/5] Fetching daily industry AI report...")
 	var reportContent string
 	ns := NewNewsStorage()
 	report, err := ns.GetDayIndustryReport(date)
 	if err != nil {
-		l.Warn("get day industry report failed", zap.Error(err))
+		l.Warn("[Step 3/5] Failed to get industry report", zap.Error(err))
 	}
 	if report != nil && strings.TrimSpace(report.Content) != "" {
 		reportContent = report.Content
+		l.Info(fmt.Sprintf("[Step 3/5] Industry report loaded, length=%d chars", len(reportContent)))
+	} else {
+		l.Info("[Step 3/5] No industry report for this date, skipped")
 	}
 
 	// 4. 生成目录结构
@@ -85,11 +93,13 @@ func RunDailyExport(date string) error {
 	if outputDir == "" {
 		outputDir = "./data/daily_export"
 	}
+	l.Info(fmt.Sprintf("[Step 4/5] Build export directory: output_dir=%s", outputDir))
 	exportPath, err := buildExportDir(outputDir, ymd, enriched, reportContent)
 	if err != nil {
+		l.Error("[Step 4/5] Build export directory failed", zap.Error(err))
 		return fmt.Errorf("build export dir: %w", err)
 	}
-	l.Info("export dir built", zap.String("path", exportPath))
+	l.Info(fmt.Sprintf("[Step 4/5] Export directory built: path=%s", exportPath))
 
 	// 5. 推送到 ModelScope
 	repo := cfg.DailyExport.ModelScopeRepo
@@ -97,12 +107,13 @@ func RunDailyExport(date string) error {
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("MODEL_SCOPE_TOKEN"))
 	}
+	l.Info(fmt.Sprintf("[Step 5/5] Push to ModelScope: repo=%s, token_set=%v", repo, token != ""))
 	if repo == "" {
-		l.Warn("modelscope_repo not configured, skip push")
+		l.Warn("[Step 5/5] modelscope_repo not configured, skip push")
 		return nil
 	}
 	if token == "" {
-		l.Warn("modelscope_token not configured, skip push")
+		l.Warn("[Step 5/5] modelscope_token not configured, skip push")
 		return nil
 	}
 
@@ -116,12 +127,12 @@ func RunDailyExport(date string) error {
 	}
 
 	if err := pushToModelScope(exportPath, ymd, repo, token, gitUser, gitEmail); err != nil {
-		l.Error("push to modelscope failed", zap.Error(err))
-		l.Info("local export still available", zap.String("path", exportPath))
+		l.Error("[Step 5/5] Push to ModelScope failed", zap.Error(err))
+		l.Info(fmt.Sprintf("[Step 5/5] Local export still available: path=%s", exportPath))
 		return fmt.Errorf("push to modelscope: %w", err)
 	}
 
-	l.Info("daily export completed successfully")
+	l.Info(fmt.Sprintf("[Step 5/5] Push to ModelScope succeeded! Daily export complete! path=%s", exportPath))
 	return nil
 }
 
@@ -446,18 +457,22 @@ func pushToModelScope(exportDir, ymd, repo, token, gitUser, gitEmail string) err
 	repoDir := filepath.Join(tmpDir, "repo")
 
 	l := applog.WithComponent("daily_export")
-	l.Info("cloning modelscope repo", zap.String("repo", repo))
+	l.Info(fmt.Sprintf("  [Git 1/4] Cloning repo: %s (depth=1)...", repo))
 
 	cmd := exec.Command("git", "clone", "--depth", "1", cloneURL, repoDir)
 	if err := runGitCmd(cmd, 120*time.Second); err != nil {
+		l.Error("  [Git 1/4] Clone failed", zap.Error(err))
 		return fmt.Errorf("git clone: %w", err)
 	}
+	l.Info("  [Git 1/4] Clone completed")
 
 	dstDir := filepath.Join(repoDir, ymd)
 	_ = os.RemoveAll(dstDir)
 	if err := copyDir(exportDir, dstDir); err != nil {
+		l.Error("  [Git 2/4] Copy export files failed", zap.Error(err))
 		return fmt.Errorf("copy export dir: %w", err)
 	}
+	l.Info(fmt.Sprintf("  [Git 2/4] Copy completed: %s -> %s", exportDir, dstDir))
 
 	if err := runGitCmd(exec.Command("git", "-C", repoDir, "config", "user.name", gitUser), 30*time.Second); err != nil {
 		return fmt.Errorf("git config user.name: %w", err)
@@ -466,6 +481,7 @@ func pushToModelScope(exportDir, ymd, repo, token, gitUser, gitEmail string) err
 		return fmt.Errorf("git config user.email: %w", err)
 	}
 	if err := runGitCmd(exec.Command("git", "-C", repoDir, "add", "-A"), 60*time.Second); err != nil {
+		l.Error("  [Git 3/4] git add failed", zap.Error(err))
 		return fmt.Errorf("git add: %w", err)
 	}
 
@@ -475,18 +491,22 @@ func pushToModelScope(exportDir, ymd, repo, token, gitUser, gitEmail string) err
 		return fmt.Errorf("git status: %w", err)
 	}
 	if strings.TrimSpace(string(statusOut)) == "" {
-		l.Info("no changes to push (already synced)", zap.String("ymd", ymd))
+		l.Info("  [Git 3/4] No changes, already up to date")
 		return nil
 	}
 
 	commitMsg := fmt.Sprintf("daily: %s", ymd)
 	if err := runGitCmd(exec.Command("git", "-C", repoDir, "commit", "-m", commitMsg), 60*time.Second); err != nil {
+		l.Error("  [Git 3/4] git commit failed", zap.Error(err))
 		return fmt.Errorf("git commit: %w", err)
 	}
+	l.Info(fmt.Sprintf("  [Git 3/4] Commit completed: %s", commitMsg))
+
 	for attempt := 1; attempt <= 3; attempt++ {
+		l.Info(fmt.Sprintf("  [Git 4/4] Push attempt %d/3...", attempt))
 		err := runGitCmd(exec.Command("git", "-C", repoDir, "push", "origin", "HEAD"), 120*time.Second)
 		if err == nil {
-			l.Info("pushed to modelscope", zap.String("repo", repo), zap.String("ymd", ymd))
+			l.Info(fmt.Sprintf("  [Git 4/4] Push succeeded! repo=%s, ymd=%s", repo, ymd))
 			return nil
 		}
 		if attempt < 3 {

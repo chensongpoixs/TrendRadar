@@ -1486,27 +1486,35 @@ func PostDailyExport(c *gin.Context) {
 		return
 	}
 
-	applog.WithComponent("api").Info("daily export triggered manually",
+	applog.WithComponent("api").Info("daily export triggered manually, launching background goroutine",
 		zap.String("date", body.Date),
 		zap.Int64("total_rows", totalRows))
 
-	// 同步执行本地导出 + Git 推送（手动触发时直接等待结果）
-	exportErr := storage.RunDailyExport(body.Date)
-	if exportErr != nil {
-		applog.WithComponent("api").Error("daily export failed", zap.Error(exportErr), zap.String("date", body.Date))
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error":   fmt.Sprintf("导出失败: %v", exportErr),
-		})
-		return
-	}
+	// 启动后台 goroutine 执行导出 + 推送，不阻塞前端响应
+	go func() {
+		applog.WithComponent("daily_export").Info("========== Daily export started (background goroutine) ==========",
+			zap.String("date", body.Date),
+			zap.Int64("total_snapshots", totalRows))
+		startTime := time.Now()
 
-	c.JSON(http.StatusOK, gin.H{
+		if err := storage.RunDailyExport(body.Date); err != nil {
+			applog.WithComponent("daily_export").Error("========== Daily export FAILED ==========",
+				zap.Error(err),
+				zap.String("date", body.Date),
+				zap.Duration("elapsed", time.Since(startTime)))
+		} else {
+			applog.WithComponent("daily_export").Info("========== Daily export COMPLETED ==========",
+				zap.String("date", body.Date),
+				zap.Duration("elapsed", time.Since(startTime)))
+		}
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
 		"success": true,
 		"data": gin.H{
 			"date":       body.Date,
 			"total_rows": totalRows,
-			"message":    fmt.Sprintf("%s 共 %d 条快照，已导出到本地并推送 ModelScope", body.Date, totalRows),
+			"message":    fmt.Sprintf("Date %s with %d snapshots, exporting to local & ModelScope in background. Check server logs for progress.", body.Date, totalRows),
 		},
 	})
 }
