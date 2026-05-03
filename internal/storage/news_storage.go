@@ -409,9 +409,29 @@ func (s *NewsStorage) GetTopicStats(topN int, mode string) ([]model.Topic, error
 
 	topics := make([]model.Topic, limit)
 	for i := 0; i < limit; i++ {
+		kw := freqItems[i].word
+		// 收集包含该关键词的新闻标题（最多 20 条）
+		var relatedTitles []model.TitleItem
+		for _, item := range items {
+			if len(relatedTitles) >= 20 {
+				break
+			}
+			if strings.Contains(item.Title, kw) {
+				relatedTitles = append(relatedTitles, model.TitleItem{
+					Title:      item.Title,
+					SourceName: item.SourceName,
+					URL:        item.URL,
+					MobileURL:  item.MobileURL,
+					Count:      1,
+					IsNew:      item.CrawlTime.After(time.Now().Add(-24 * time.Hour)),
+					TimeDisplay: item.CrawlTime.Format("2006-01-02 15:04"),
+				})
+			}
+		}
 		topics[i] = model.Topic{
-			Word:  freqItems[i].word,
+			Word:  kw,
 			Count: freqItems[i].count,
+			Titles: relatedTitles,
 		}
 	}
 
