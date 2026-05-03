@@ -106,17 +106,52 @@ ai:
   num_retries: 10 # 失败重试次数
 
 # 兴趣标题过滤：分批 + 单批输入上限 + 可选输出 cap（详见 docs/ai-filter-batching.md）
+# 可选覆盖全局 ai 配置：model, api_base, api_key, timeout, temperature, max_tokens, num_retries
+# 非空/>0 时覆盖 ai 节对应字段，为空/=0 时继承全局配置
 ai_filter:
   batch_size: 18 # 每批最多条数（与 max_input_chars 取更紧的约束）
   max_input_chars: 12000 # 单批 user 内容 rune 上限，含兴趣长文+标题列表+模板尾；0=只按条数
   batch_interval: 3000 # 批次间间隔（毫秒），本机 Ollama 时略作喘息；0=不睡
   max_output_tokens: 16384 # 本任务单请求 max_tokens，避免 JSON 被压满才截断、content 变空
   min_score: 0.7
+  # model: ""                # 可选：覆盖 ai.model
+  # api_base: ""             # 可选：覆盖 ai.api_base
+  model: "gemma-4-26B-A4B-it-Q4_K_M"
+  #model: "claude-sonnet-4-6" # 模型标识（格式: provider/model_name）
+  #model: "MiMo-VL-7B-RL-Q4_K_M"
+  api_base: "http://127.0.0.1:11434" # 自定义 API 端点（可选，大多数情况留空）
+  api_key: "ddd" # API Key（建议使用环境变量 AI_API_KEY）
+  timeout: 3000 # 请求超时时间（秒）
+  temperature: 1.0 # 采样温度 (0.0-2.0)
+  max_tokens: 102400 # 最大生成 token 数
+  num_retries: 10 # 失败重试次数
 
 ai_analysis:
   enabled: true
-  mode: "current"
+  #mode: "current"
   max_news_for_analysis: 80
+  # model: ""                # 可选：覆盖 ai.model（如用云端大模型生成深度分析）
+  # api_base: ""             # 可选：覆盖 ai.api_base
+  # model: "gemma-4-26B-A4B-it-Q4_K_M"
+  
+  #model: "claude-sonnet-4-6" # 模型标识（格式: provider/model_name）
+  #model: "MiMo-VL-7B-RL-Q4_K_M"
+  #api_base: "http://127.0.0.1:11434" # 自定义 API 端点（可选，大多数情况留空）
+  api_base: "http://192.168.3.2:20901" # 本机 Ollama 反向代理到另一台服务器的地址（示例）
+  model: "deepseek-v4-flash"
+  
+  api_key: "ddd" # API Key（建议使用环境变量 AI_API_KEY）
+  timeout: 3000 # 请求超时时间（秒）
+  temperature: 1.0 # 采样温度 (0.0-2.0)
+  max_tokens: 102400 # 最大生成 token 数
+  num_retries: 10 # 失败重试次数
+# AI 翻译（可选，按需启用）
+# 同样支持覆盖全局 ai 配置：model, api_base, api_key, timeout, temperature, max_tokens, num_retries
+ai_translation:
+  enabled: false
+  language: "Simplified Chinese"
+  # model: ""                # 可选：覆盖 ai.model
+  # api_base: ""             # 可选：覆盖 ai.api_base
 
 notification:
   enabled: true

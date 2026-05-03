@@ -21,9 +21,9 @@ type Config struct {
 	Report        ReportConfig
 	Filter        FilterConfig
 	AI            AIConfig
-	AIAnalysis    AIAnalysisConfig
-	AIFilter      AIFilterConfig `mapstructure:"ai_filter"`
-	AITranslation AITranslationConfig
+	AIAnalysis    AIAnalysisConfig    `mapstructure:"ai_analysis"`
+	AIFilter      AIFilterConfig     `mapstructure:"ai_filter"`
+	AITranslation AITranslationConfig `mapstructure:"ai_translation"`
 	Notification  NotificationConfig
 	Storage       StorageConfig
 	Advanced      AdvancedConfig

@@ -393,7 +393,7 @@ func PostSnapshotDayInsights(c *gin.Context) {
 	}
 	modelName := ""
 	if cfg != nil {
-		modelName = cfg.AI.Model
+		modelName = cfg.AIAnalysis.EffectiveAIConfig(cfg.AI).Model
 	}
 	if err := newsStorage.SaveDayIndustryReport(date, content, modelName); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
