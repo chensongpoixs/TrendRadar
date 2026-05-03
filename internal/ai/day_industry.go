@@ -18,10 +18,8 @@ func GenerateDayIndustryReport(ctx context.Context, dateLocal, digest, timezone 
 		return "", fmt.Errorf("no digest lines for this date")
 	}
 	cfg := config.Get()
-	modelName := ""
-	if cfg != nil {
-		modelName = cfg.AI.Model
-	}
+	eff := cfg.AIAnalysis.EffectiveAIConfig(cfg.AI)
+	modelName := eff.Model
 
 	sys := `你是资深科技产业与一二级投研背景的行业研究专家，拥有顶级券商研究所+头部VC的双重经验。请仅根据用户给出的「某日多平台热榜标题流」写一份**当日行业快讯/路演纪要体**（中文），**不得编造**标题中不存在的公司名、金额与事件；若仅能从标题做弱线索归纳，须标注「据标题信号」「待交叉验证」。
 
@@ -46,7 +44,7 @@ func GenerateDayIndustryReport(ctx context.Context, dateLocal, digest, timezone 
 	user := fmt.Sprintf("【统计日（应用时区自然日）】%s\n【时区】%s\n【当前分析模型】%s\n\n【标题清单】（多平台、多时刻合并去重，按先后大致排列；长清单已截断以适配上下文）\n\n%s",
 		dateLocal, timezone, modelName, digest)
 
-	client := NewAIClient()
+	client := NewAIClientFromConfig(eff)
 	applyDayIndustryHTTPDefaults(client)
 	msgs := []ChatMessage{
 		{Role: "system", Content: sys},
@@ -64,8 +62,8 @@ func applyDayIndustryHTTPDefaults(c *AIClient) {
 		return
 	}
 	cfg := config.Get()
-	if c.timeout == 0 && cfg != nil {
-		tsec := cfg.AI.Timeout
+	if c.timeout == 0 {
+		tsec := cfg.AIAnalysis.EffectiveAIConfig(cfg.AI).Timeout
 		if tsec <= 0 {
 			tsec = 180
 		}
