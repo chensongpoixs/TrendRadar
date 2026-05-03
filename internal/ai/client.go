@@ -75,10 +75,13 @@ func isRetryable(err error) bool {
 	return true
 }
 
-// NewAIClient 创建 AI 客户端
+// NewAIClient 创建 AI 客户端（使用全局 ai 配置）
 func NewAIClient() *AIClient {
-	cfg := config.Get().AI
+	return NewAIClientFromConfig(config.Get().AI)
+}
 
+// NewAIClientFromConfig 根据给定 AIConfig 创建客户端，支持各子模块传入合并后的独立配置
+func NewAIClientFromConfig(cfg config.AIConfig) *AIClient {
 	return &AIClient{
 		model:       cfg.Model,
 		apiKey:      cfg.APIKey,

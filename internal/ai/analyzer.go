@@ -3,6 +3,8 @@ package ai
 import (
 	"fmt"
 	"strings"
+
+	"github.com/trendradar/backend-go/pkg/config"
 )
 
 // Analyzer AI 分析器
@@ -33,8 +35,9 @@ type AnalysisResult struct {
 
 // NewAnalyzer 创建分析器
 func NewAnalyzer() *Analyzer {
+	cfg := config.Get()
 	return &Analyzer{
-		client: NewAIClient(),
+		client: NewAIClientFromConfig(cfg.AIAnalysis.EffectiveAIConfig(cfg.AI)),
 	}
 }
 

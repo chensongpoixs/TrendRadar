@@ -144,6 +144,43 @@ type AIConfig struct {
 	FallbackModels []string `mapstructure:"fallback_models"`
 }
 
+// AIModelOverride 可选的模型/端点覆盖，嵌入各 AI 子配置段实现不同任务使用不同 LLM
+type AIModelOverride struct {
+	Model       string  `mapstructure:"model"`       // 覆盖 ai.model（非空生效）
+	APIBase     string  `mapstructure:"api_base"`    // 覆盖 ai.api_base（非空生效）
+	APIKey      string  `mapstructure:"api_key"`     // 覆盖 ai.api_key（非空生效）
+	Timeout     int     `mapstructure:"timeout"`     // 覆盖 ai.timeout（>0 生效）
+	Temperature float64 `mapstructure:"temperature"` // 覆盖 ai.temperature（!=0 生效）
+	MaxTokens   int     `mapstructure:"max_tokens"`  // 覆盖 ai.max_tokens（>0 生效）
+	NumRetries  int     `mapstructure:"num_retries"` // 覆盖 ai.num_retries（>0 生效）
+}
+
+// EffectiveAIConfig 将覆盖值合并到全局 AI 配置，返回有效配置
+func (o *AIModelOverride) EffectiveAIConfig(base AIConfig) AIConfig {
+	if o.Model != "" {
+		base.Model = o.Model
+	}
+	if o.APIBase != "" {
+		base.APIBase = o.APIBase
+	}
+	if o.APIKey != "" {
+		base.APIKey = o.APIKey
+	}
+	if o.Timeout > 0 {
+		base.Timeout = o.Timeout
+	}
+	if o.Temperature != 0 {
+		base.Temperature = o.Temperature
+	}
+	if o.MaxTokens > 0 {
+		base.MaxTokens = o.MaxTokens
+	}
+	if o.NumRetries > 0 {
+		base.NumRetries = o.NumRetries
+	}
+	return base
+}
+
 // AIAnalysisConfig AI 分析配置
 type AIAnalysisConfig struct {
 	Enabled             bool   `mapstructure:"enabled"`
@@ -154,6 +191,7 @@ type AIAnalysisConfig struct {
 	IncludeRSS          bool   `mapstructure:"include_rss"`
 	IncludeStandalone   bool   `mapstructure:"include_standalone"`
 	IncludeRankTimeline bool   `mapstructure:"include_rank_timeline"`
+	AIModelOverride     `mapstructure:",squash"`
 }
 
 // AIFilterConfig AI 筛选配置（yaml 节名 ai_filter）
@@ -169,6 +207,7 @@ type AIFilterConfig struct {
 	ReclassifyThreshold float64 `mapstructure:"reclassify_threshold"`
 	PromptFile          string  `mapstructure:"prompt_file"`
 	ExtractPromptFile   string  `mapstructure:"extract_prompt_file"`
+	AIModelOverride     `mapstructure:",squash"`
 }
 
 // AITranslationConfig AI 翻译配置
@@ -181,6 +220,7 @@ type AITranslationConfig struct {
 		RSS        bool `mapstructure:"rss"`
 		Standalone bool `mapstructure:"standalone"`
 	} `mapstructure:"scope"`
+	AIModelOverride `mapstructure:",squash"`
 }
 
 // NotificationConfig 通知配置

@@ -48,7 +48,7 @@ func NewFilter(interests string, minScore float64, opt FilterOptions) *Filter {
 		bs = 20
 	}
 	return &Filter{
-		client:          NewAIClient(),
+		client:          NewAIClientFromConfig(config.Get().AIFilter.EffectiveAIConfig(config.Get().AI)),
 		interests:       interests,
 		minScore:        minScore,
 		batchSize:       bs,

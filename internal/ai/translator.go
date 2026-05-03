@@ -3,6 +3,8 @@ package ai
 import (
 	"fmt"
 	"strings"
+
+	"github.com/trendradar/backend-go/pkg/config"
 )
 
 // Translator AI 翻译器
@@ -30,8 +32,9 @@ func NewTranslator(targetLang string, sourceLang string, batchSize int, includeO
 		batchSize = 20
 	}
 
+	cfg := config.Get()
 	return &Translator{
-		client:        NewAIClient(),
+		client:        NewAIClientFromConfig(cfg.AITranslation.EffectiveAIConfig(cfg.AI)),
 		targetLang:    targetLang,
 		sourceLang:    sourceLang,
 		batchSize:     batchSize,

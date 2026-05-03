@@ -6,12 +6,17 @@
 
 ## 1. 能力总览
 
-| 能力 | 包内入口 | 典型场景 | 说明 |
-|------|----------|----------|------|
-| **兴趣标题过滤** | `Filter`（`filter.go`） | 定时任务、API 带 `use_ai_filter=true` | 按用户「兴趣描述」对**标题**打分，按 `min_score` 留条 |
-| **深度内容分析** | `Analyzer`（`analyzer.go`） | 预留 `buildAINewsSummary`；**当前** `GetLatestNews` 已关深度分析，仅返回占位 | 多段 JSON 结果（趋势/情感/信号等） |
-| **单条/通用对话** | `AIClient.Chat`（`client.go`） | 被上述模块调用 | 统一走 `.../v1/chat/completions` 兼容端点 |
-| **翻译** | `Translator`（`translator.go`） | 需业务显式调用 | 与过滤/分析独立的提示词 |
+| 能力 | 包内入口 | HTTP 端点 | 典型场景 | 说明 |
+|------|----------|-----------|----------|------|
+| **兴趣标题过滤** | `Filter`（`filter.go`） | 无（仅调度管线） | 定时任务 | 按用户「兴趣描述」对标题打分，按 `min_score` 留条 |
+| **焦点过滤编排** | `ApplyFocusFilter`（`focus.go`） | 无（仅调度管线） | 定时任务爬取后 | 编排层，实例化 Filter 并应用到全平台新闻映射 |
+| **深度内容分析** | `Analyzer`（`analyzer.go`） | 无（已禁用） | 预留 `buildAINewsSummary` | 多段 JSON 结果（趋势/情感/信号等） |
+| **情感分析（LLM）** | `Analyzer.AnalyzeSentiment` | 无（未接线） | 预留 | LLM 情感分析，返回 sentiment/confidence/reasoning |
+| **单条新闻文章摘要** | `SummarizeNewsArticle`（`article_analyze.go`） | `POST /api/v1/news/analyze` | 前端「AI 分析」按钮 | 抓取正文 → LLM 生成报纸风格中文分析 |
+| **每日行业研报** | `GenerateDayIndustryReport`（`day_industry.go`） | `POST /api/v1/news/snapshots/:date/insights` | 前端日期页「AI 研报」 | 基于当日全平台标题流生成路演体例投研报告 |
+| **通用 AI 对话代理** | `PostAIChat`（`handlers_chat.go`） | `POST /api/v1/ai/chat` | 前端 AI 对话 | 转发多轮消息到 LLM，key 不暴露给前端 |
+| **翻译** | `Translator`（`translator.go`） | 无 | 需业务显式调用 | 单条/批量翻译，与过滤/分析独立的提示词 |
+| **关键词分析（非 LLM）** | `handlers.go` 中的分析 handler | 见下方 8 节 | 前端分析中心 | 话题趋势、情感（关键词匹配）、聚类、时期对比 |
 
 - **兴趣说明**：见上节，可由 `config/ai_interests.txt` 提供；过滤批处理里的系统/用户**模板**仍在 `filter.go` 代码中。  
 - `AIFilter.PromptFile`、`AIAnalysis.PromptFile` 等仍**未在 Go 中接文件**；`Analyzer` 提示在 `analyzer.go` 内嵌。若将来外置，需接加载器并替换下文章节说明。
@@ -140,7 +145,142 @@ filter:
 
 ---
 
-## 6. 行为对照表（便于排障）
+## 6. 单条新闻文章摘要 `SummarizeNewsArticle`
+
+**文件:** `internal/ai/article_analyze.go`
+
+### 6.1 数据流
+
+1. HTTP `POST /api/v1/news/analyze` → handler `PostAnalyzeNewsArticle`
+2. 接收 `title`, `url`, `source_name`（可选）
+3. 调用 `ai.FetchArticleWithFallback(ctx, url, mobileURL)` 抓取正文：
+   - 使用 Chrome 模拟请求头
+   - 403/429/503 时重试
+   - 失败则降级到 Jina AI Reader (`r.jina.ai`)
+4. 正文截断至 12000 runes（`maxFetchTextRunes`）
+5. 将 title + body 送 LLM，system prompt 定位为「报纸编辑」，要求生成：
+   - 核心事实
+   - 竞争格局
+   - 后续关注点
+6. 输出限制 ~400 字中文，`max_tokens=2048`
+7. 若正文抓取失败，基于标题生成保守摘要
+
+### 6.2 配置
+
+| 配置项 | 含义 |
+|--------|------|
+| `ai.model` / `ai.api_base` / `ai.api_key` | 共用 LLM 配置 |
+| `ai.timeout` | HTTP 超时（秒） |
+
+### 6.3 提示词要点
+
+- **system**: 定位「报纸编辑」，输出面向行业从业者的中文分析，约 400 字
+- **user**: `标题：{title}\n\n正文内容：\n{body}`
+- 无正文时: `标题：{title}\n\n（注：文章正文未能成功抓取，请基于标题进行保守分析）`
+
+---
+
+## 7. 每日行业研报 `GenerateDayIndustryReport`
+
+**文件:** `internal/ai/day_industry.go`
+
+### 7.1 数据流
+
+1. HTTP `POST /api/v1/news/snapshots/:date/insights` → handler `PostSnapshotDayInsights`
+2. 查询当日所有平台 hotlist_snapshots，去重后按时间排序
+3. 构建标题摘要（`buildInsightDigest`），含：
+   - 平台分布统计
+   - 每小时标题流（格式：`HH:00 [平台] 标题`）
+4. LLM `max_tokens=8192`，生成路演/会议纪要体例的中文投研报告
+5. 结果缓存到 `day_industry_reports` 表
+6. 读取：`GET /api/v1/news/snapshots/:date/insights` 返回缓存
+
+### 7.2 提示词要点
+
+- **system**: ~40 行中文 prompt，定位「资深科技产业与投资研究专家」
+- 要求覆盖 6 个维度：
+  1. 宏观/市场情绪
+  2. 行业与板块机会（结构性机会 + 主题催化）
+  3. 可落地的线索（投融资、并购、开源、新品、政策）
+  4. 从业者/普通人可参与的方向
+  5. 风险、噪音与重复信息
+  6. 信息局限性与合规声明
+- 明确要求**不编造事实**，信号不足时标注「据标题信号」「待交叉验证」
+- **user**: 标题摘要正文（含平台统计 + 小时标题流）
+
+### 7.3 配置
+
+| 配置项 | 含义 |
+|--------|------|
+| `ai.model` / `ai.api_base` | 共用 LLM 配置 |
+
+---
+
+## 8. 焦点过滤编排 `ApplyFocusFilter`
+
+**文件:** `internal/ai/focus.go`
+
+### 8.1 数据流
+
+1. 调度器爬取完成后调用 `ApplyFocusFilter(platforms, rss)`
+2. `FocusFilterEnforced()` 守卫检查：`filter.method == "ai"` 且 `filter.interests` 非空
+3. 实例化 `Filter`，展平所有平台新闻为 `[]NewsItem`
+4. 调用 `Filter.FilterNews()` 打分
+5. 仅保留 `score >= min_score` 的条目，重建 `map[platformID][]NewsItem`
+6. 过滤失败 → 回退原始数据（避免任务整体无数据）
+
+### 8.2 与 Filter 的关系
+
+- `Filter`（`filter.go`）：底层 LLM 调用 + 批处理
+- `ApplyFocusFilter`（`focus.go`）：编排层，负责数据准备与结果映射
+
+---
+
+## 9. 通用 AI 对话代理 `PostAIChat`
+
+**文件:** `internal/api/handlers_chat.go`
+
+### 9.1 数据流
+
+1. HTTP `POST /api/v1/ai/chat` → 转发多轮消息到 LLM
+2. 请求格式：`{ messages: [{role, content}], max_tokens?, temperature? }`
+3. 安全限制：
+   - 最多 48 条消息
+   - 单条消息最长 16000 runes
+   - 总长度 200000 runes
+   - HTTP 超时 5 分钟
+   - 输出 token 上限 16000
+4. API key 不暴露给前端（后端持有）
+
+### 9.2 配置
+
+| 配置项 | 含义 |
+|--------|------|
+| `ai.model` / `ai.api_base` / `ai.api_key` | 共用 LLM 配置 |
+
+---
+
+## 10. 非 LLM 分析（关键词/统计算法）
+
+**文件:** `internal/api/handlers.go`
+
+以下 4 个分析端点**不使用 LLM**，基于关键词匹配和统计算法：
+
+| Handler | 端点 | 方法 | 说明 |
+|---------|------|------|------|
+| `AnalyzeTopicTrend` | `POST /api/v1/analytics/topic/trend` | 关键词搜索 + 按日计数 | 输入话题关键词，按日期聚合新闻数量，支持 trend/lifecycle 模式 |
+| `AnalyzeSentiment` | `POST /api/v1/analytics/sentiment` | 中文正负面关键词匹配 | 对标题做正面/负面关键词计数，返回分布与百分比 |
+| `AggregateNews` | `POST /api/v1/analytics/aggregate` | Jaccard 相似度 + 关键词聚类 | 对标题分词后聚类，输出话题簇 |
+| `ComparePeriods` | `POST /api/v1/analytics/compare-periods` | 关键词频率跨时段对比 | 输入两个日期范围，对比关键词出现次数变化，返回变化率 TOP 20 |
+
+### 10.1 情感分析关键词
+
+- **正面**: 利好、突破、增长、创新、上涨、夺冠、获奖、成功、领先、优化、升级……
+- **负面**: 下跌、暴跌、崩盘、亏损、裁员、事故、危机、违规、处罚、失败、争议……
+
+---
+
+## 11. 行为对照表（便于排障）
 
 | 现象 | 可能原因 |
 |------|----------|
@@ -152,15 +292,19 @@ filter:
 
 ---
 
-## 7. 相关源码索引
+## 12. 相关源码索引
 
-- `internal/ai/filter.go` — 兴趣过滤提示词与批处理  
-- `internal/ai/analyzer.go` — 深度分析、摘要、情感、实体、分类  
-- `internal/ai/client.go` — HTTP、Chat、AnalyzeNews  
-- `internal/ai/translator.go` — 翻译  
-- `internal/scheduler/scheduler.go` — `applyAIFocusFilter` 与邮件管线  
-- `internal/api/handlers.go` — `applyAIFocusFilter`、`GetLatestNews` 中 AI 开关、占位 `ai_analysis`  
-- `pkg/config/config.go` — `FilterConfig`、`AIConfig`、`AIAnalysisConfig`、`AIFilterConfig`  
+- `internal/ai/filter.go` — 兴趣过滤提示词与批处理
+- `internal/ai/focus.go` — 焦点过滤编排层
+- `internal/ai/analyzer.go` — 深度分析、摘要、情感、实体、分类
+- `internal/ai/article_analyze.go` — 单条新闻文章摘要（正文抓取 + LLM）
+- `internal/ai/day_industry.go` — 每日行业研报
+- `internal/ai/client.go` — HTTP、Chat、AnalyzeNews
+- `internal/ai/translator.go` — 翻译
+- `internal/api/handlers.go` — 分析 handler（话题趋势、情感、聚类、时期对比） + AI 过滤 API
+- `internal/api/handlers_chat.go` — 通用 AI 对话代理
+- `internal/scheduler/scheduler.go` — `applyAIFocusFilter` 与邮件管线
+- `pkg/config/config.go` — `FilterConfig`、`AIConfig`、`AIAnalysisConfig`、`AIFilterConfig`、`AITranslationConfig`
 - `config/config.yaml` — 运行时可改参数（**勿将密钥提交公库**）
 
 ---
