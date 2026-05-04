@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,114 @@ func GetLatestNews(c *gin.Context) {
 				"enabled": false,
 				"reason":  "read_only_from_database",
 			},
+		},
+	})
+}
+
+// HotEvent 首页热门事件（含热度分）
+type HotEvent struct {
+	Title       string             `json:"title"`
+	URL         string             `json:"url"`
+	MobileURL   string             `json:"mobile_url"`
+	HeatScore   int                `json:"heat_score"`
+	Sources     []model.NewsSource `json:"sources"`
+	SourceCount int                `json:"source_count"`
+	MaxRank     int                `json:"max_rank"`
+	CrawlTime   string             `json:"crawl_time"`
+}
+
+// PlatformSummary 平台摘要
+type PlatformSummary struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ItemCount int    `json:"item_count"`
+	Status    string `json:"status"`
+}
+
+// GetHotEvents 返回首页热门事件（含热度分 + 平台摘要）
+func GetHotEvents(c *gin.Context) {
+	cfg := config.Get()
+	var platformIDs []string
+	for _, src := range cfg.Platforms.Sources {
+		if src.Enabled {
+			platformIDs = append(platformIDs, src.ID)
+		}
+	}
+
+	ns := storage.NewNewsStorage()
+	results, lastCrawl, err := ns.GetLatestNews(platformIDs, 100)
+	if err != nil {
+		applog.WithComponent("api").Error("get hot events failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// 构建 id -> name 映射
+	idToName := make(map[string]string)
+	for _, src := range cfg.Platforms.Sources {
+		if src.ID != "" {
+			idToName[src.ID] = src.Name
+		}
+	}
+
+	// 跨平台合并
+	merged := storage.MergeCrossPlatform(results, idToName, 0.6)
+
+	// 计算热度分：heat_score = (100 - max_rank) * source_count
+	hotEvents := make([]HotEvent, 0, len(merged))
+	for _, m := range merged {
+		heatScore := (100 - m.MaxRank) * m.TotalCount
+		if heatScore < 0 {
+			heatScore = 0
+		}
+		hotEvents = append(hotEvents, HotEvent{
+			Title:       m.Title,
+			URL:         m.URL,
+			MobileURL:   m.MobileURL,
+			HeatScore:   heatScore,
+			Sources:     m.Sources,
+			SourceCount: m.TotalCount,
+			MaxRank:     m.MaxRank,
+			CrawlTime:   m.CrawlTime.Format(time.RFC3339),
+		})
+	}
+
+	// 按热度分降序排列
+	sort.Slice(hotEvents, func(i, j int) bool {
+		return hotEvents[i].HeatScore > hotEvents[j].HeatScore
+	})
+
+	// 构建平台摘要
+	platforms := make([]PlatformSummary, 0, len(platformIDs))
+	for _, pid := range platformIDs {
+		items, ok := results[pid]
+		status := "active"
+		if !ok || len(items) == 0 {
+			status = "empty"
+		}
+		platforms = append(platforms, PlatformSummary{
+			ID:        pid,
+			Name:      idToName[pid],
+			ItemCount: len(items),
+			Status:    status,
+		})
+	}
+
+	crawlTimeStr := ""
+	if !lastCrawl.IsZero() {
+		crawlTimeStr = lastCrawl.Format(time.RFC3339)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"hot_events":  hotEvents,
+			"platforms":   platforms,
+			"total_events": len(hotEvents),
+			"crawl_time":  crawlTimeStr,
 		},
 	})
 }
@@ -222,14 +331,29 @@ func GetSnapshotDaySummary(c *gin.Context) {
 			idToName[src.ID] = src.Name
 		}
 	}
+	// 额外获取平台分布
+	platformCounts, _ := newsStorage.GetPlatformCountsForDate(date)
+	platformSummary := make([]gin.H, 0)
+	for _, pc := range platformCounts {
+		name := idToName[pc.SourceID]
+		if name == "" {
+			name = pc.SourceID
+		}
+		platformSummary = append(platformSummary, gin.H{
+			"id":         pc.SourceID,
+			"name":       name,
+			"item_count": pc.Count,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"date":       date,
-			"timezone":   cfg.App.Timezone,
-			"total_rows": total,
-			"hours":      hours,
-			"id_to_name": idToName,
+			"date":              date,
+			"timezone":          cfg.App.Timezone,
+			"total_rows":        total,
+			"hours":             hours,
+			"id_to_name":        idToName,
+			"platform_summary":  platformSummary,
 		},
 	})
 }

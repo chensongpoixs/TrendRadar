@@ -590,6 +590,25 @@ func (s *NewsStorage) GetSnapshotDaySummary(dateLocal string) ([]SnapshotHourSta
 	return out, total, nil
 }
 
+// PlatformCount 按日平台分布
+type PlatformCount struct {
+	SourceID string `json:"source_id" gorm:"column:source_id"`
+	Count    int64  `json:"count"     gorm:"column:cnt"`
+}
+
+// GetPlatformCountsForDate 返回某日各平台抓取条目数
+func (s *NewsStorage) GetPlatformCountsForDate(dateLocal string) ([]PlatformCount, error) {
+	db := core.GetDB()
+	var rows []PlatformCount
+	err := db.Model(&model.HotlistSnapshot{}).
+		Select("source_id, COUNT(*) AS cnt").
+		Where("date_local = ?", dateLocal).
+		Group("source_id").
+		Order("cnt DESC").
+		Scan(&rows).Error
+	return rows, err
+}
+
 // GetSnapshotForHour 返回某小时全部快照，按同一 source+url 仅保留「最晚一次抓取」
 func (s *NewsStorage) GetSnapshotForHour(dateLocal string, hour int, platformIDs []string) ([]model.HotlistSnapshot, error) {
 	if hour < 0 || hour > 23 {
