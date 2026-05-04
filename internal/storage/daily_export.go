@@ -42,6 +42,8 @@ func RunDailyExport(date string) error {
 		date = time.Now().In(tz).Format("2006-01-02")
 	}
 	ymd := strings.ReplaceAll(date, "-", "")
+	year := ymd[0:4]
+	month := ymd[4:6]
 
 	l := applog.WithComponent("daily_export").With(zap.String("date", date), zap.String("ymd", ymd))
 	l.Info("[Step 1/5] Daily export started ==========")
@@ -126,7 +128,7 @@ func RunDailyExport(date string) error {
 		gitEmail = "chensongpoixs@example.com"
 	}
 
-	if err := pushToModelScope(exportPath, ymd, repo, token, gitUser, gitEmail); err != nil {
+	if err := pushToModelScope(exportPath, year, month, ymd, repo, token, gitUser, gitEmail); err != nil {
 		l.Error("[Step 5/5] Push to ModelScope failed", zap.Error(err))
 		l.Info(fmt.Sprintf("[Step 5/5] Local export still available: path=%s", exportPath))
 		return fmt.Errorf("push to modelscope: %w", err)
@@ -276,9 +278,11 @@ func QueryDailySnapshots(date string) (map[string][]model.HotlistSnapshot, error
 	return out, nil
 }
 
-// buildExportDir 生成 YYYYMMDD/平台/新闻标题.md 的目录结构，返回导出根路径。
+// buildExportDir 生成 年份/月份/YYYYMMDD/平台/新闻标题.md 的目录结构，返回导出根路径。
 func buildExportDir(baseDir, ymd string, platforms map[string][]enrichedNews, reportContent string) (string, error) {
-	root := filepath.Join(baseDir, ymd)
+	year := ymd[0:4]
+	month := ymd[4:6]
+	root := filepath.Join(baseDir, year, month, ymd)
 	if err := os.RemoveAll(root); err != nil {
 		return "", err
 	}
@@ -349,10 +353,12 @@ func buildReadmeMD(ymd string, platforms map[string][]enrichedNews, reportConten
 
 	b.WriteString("## 目录结构\n\n")
 	b.WriteString("```\n")
-	b.WriteString(fmt.Sprintf("%s/\n", ymd))
-	b.WriteString("├── README.md          # 本文件\n")
+	b.WriteString(fmt.Sprintf("%s/\n", ymd[0:4]))
+	b.WriteString(fmt.Sprintf("└── %s/\n", ymd[4:6]))
+	b.WriteString(fmt.Sprintf("    └── %s/\n", ymd))
+	b.WriteString("        ├── README.md          # 本文件\n")
 	for _, pid := range platformNames {
-		b.WriteString(fmt.Sprintf("├── %s/           # %d 条\n", pid, len(platforms[pid])))
+		b.WriteString(fmt.Sprintf("        ├── %s/           # %d 条\n", pid, len(platforms[pid])))
 	}
 	b.WriteString("```\n\n")
 
@@ -445,8 +451,8 @@ func uniqueFilePath(path string) string {
 	}
 }
 
-// pushToModelScope 将导出目录推送到 ModelScope 数据集仓库。
-func pushToModelScope(exportDir, ymd, repo, token, gitUser, gitEmail string) error {
+// pushToModelScope 将导出目录推送到 ModelScope 数据集仓库。year/month/ymd 构成仓库内的层级路径。
+func pushToModelScope(exportDir, year, month, ymd, repo, token, gitUser, gitEmail string) error {
 	tmpDir, err := os.MkdirTemp("", "modelscope_push_*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
@@ -466,7 +472,7 @@ func pushToModelScope(exportDir, ymd, repo, token, gitUser, gitEmail string) err
 	}
 	l.Info("  [Git 1/4] Clone completed")
 
-	dstDir := filepath.Join(repoDir, ymd)
+	dstDir := filepath.Join(repoDir, year, month, ymd)
 	_ = os.RemoveAll(dstDir)
 	if err := copyDir(exportDir, dstDir); err != nil {
 		l.Error("  [Git 2/4] Copy export files failed", zap.Error(err))
