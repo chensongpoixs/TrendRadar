@@ -37,11 +37,11 @@ func (s *Server) registerWebUI() {
 	s.router.GET("/", func(c *gin.Context) {
 		c.File(indexPath)
 	})
-	s.router.NoRoute(spaFallback(indexPath))
+	s.router.NoRoute(spaFallback(indexPath, root))
 	logger.WithComponent("http").Info("serving web UI from local static files", zap.String("web_root", root))
 }
 
-func spaFallback(indexPath string) gin.HandlerFunc {
+func spaFallback(indexPath string, root string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
 			c.AbortWithStatus(http.StatusNotFound)
@@ -59,6 +59,15 @@ func spaFallback(indexPath string) gin.HandlerFunc {
 		if strings.HasPrefix(p, "/assets/") {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
+		}
+		// Serve root-level static files (PWA: registerSW.js, sw.js, manifest.webmanifest, etc.)
+		// that don't live under /assets/ and would otherwise get the SPA fallback.
+		if !strings.Contains(p, "..") {
+			filePath := filepath.Join(root, filepath.Clean(p))
+			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				c.File(filePath)
+				return
+			}
 		}
 		c.File(indexPath)
 	}
