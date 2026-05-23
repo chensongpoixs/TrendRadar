@@ -158,8 +158,9 @@ func (s *Scheduler) runCrawlTask() {
 	taskKey := "crawl"
 
 	// 检查是否刚运行过（防止重复执行）
+	// 使用 55 分钟而非 1 小时，避免整点触发时因毫秒级时间差异被误判为"刚运行过"
 	if lastRun, exists := s.lastRun[taskKey]; exists {
-		if now.Sub(lastRun) < time.Hour {
+		if now.Sub(lastRun) <= 55*time.Minute {
 			s.mutex.Unlock()
 			logger.WithComponent("scheduler").Info("crawl task skipped, ran recently", zap.String("op", "runCrawlTask"))
 			return
