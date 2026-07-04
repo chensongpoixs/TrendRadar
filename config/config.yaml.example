@@ -208,6 +208,18 @@ advanced:
     timeout: 15
     use_proxy: false
     proxy_url: ""
+  web_fetch:
+    timeout: 18              # page fetch timeout in seconds
+    retries: 2               # retry count for network/5xx/429 responses
+    backoff_ms: 1200         # base retry backoff
+    min_text_chars: 180      # shorter pages are treated as JS shells/weak content
+    max_text_runes: 12000    # max extracted text length used by AI/export
+    max_body_mb: 2           # max response body to read
+    user_agent: ""           # empty = built-in browser-like UA
+    jina_enabled: true       # fallback reader for public JS-rendered pages
+    jina_timeout: 28         # Jina Reader timeout in seconds
+    jina_base_url: "https://r.jina.ai"
+    respect_robots: false    # true = skip pages disallowed by robots.txt
   weight:
     rank: 0.6
     frequency: 0.3

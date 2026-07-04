@@ -22,7 +22,7 @@ type Config struct {
 	Filter        FilterConfig
 	AI            AIConfig
 	AIAnalysis    AIAnalysisConfig    `mapstructure:"ai_analysis"`
-	AIFilter      AIFilterConfig     `mapstructure:"ai_filter"`
+	AIFilter      AIFilterConfig      `mapstructure:"ai_filter"`
 	AITranslation AITranslationConfig `mapstructure:"ai_translation"`
 	Notification  NotificationConfig
 	Storage       StorageConfig
@@ -196,13 +196,13 @@ type AIAnalysisConfig struct {
 
 // AIFilterConfig AI 筛选配置（yaml 节名 ai_filter）
 type AIFilterConfig struct {
-	BatchSize   int `mapstructure:"batch_size"`   // 每批最多条数，防止一次喂太多条标题
+	BatchSize     int `mapstructure:"batch_size"`     // 每批最多条数，防止一次喂太多条标题
 	BatchInterval int `mapstructure:"batch_interval"` // 批次间间隔（毫秒），0=不睡；缓解限流与 CPU
 	// MaxInputChars 单批 user 内容字符上限（按 Unicode 码点计，含兴趣全文+本批标题+模板尾）。
 	// 0 表示不启用「按输入体量切分」，仅按 batch_size 切。
 	MaxInputChars int `mapstructure:"max_input_chars"`
 	// MaxOutputTokens 本任务单请求 max_tokens 覆盖；0 表示使用全局 ai.max_tokens（过滤建议单独设大，避免 JSON 被截断）
-	MaxOutputTokens int `mapstructure:"max_output_tokens"`
+	MaxOutputTokens     int     `mapstructure:"max_output_tokens"`
 	MinScore            float64 `mapstructure:"min_score"`
 	ReclassifyThreshold float64 `mapstructure:"reclassify_threshold"`
 	PromptFile          string  `mapstructure:"prompt_file"`
@@ -245,12 +245,12 @@ type ChannelConfig struct {
 
 // ServerChanConfig Server 酱 SendKey，用于将推送转到用户已绑定的微信
 type ServerChanConfig struct {
-	SendKey      string `mapstructure:"sendkey"`
+	SendKey string `mapstructure:"sendkey"`
 	// BatchEnabled 为 true 时：不随邮件即时推送，由定时任务按 slot 合并多段纯文本后推送（见 merge_segments）
-	BatchEnabled  bool   `mapstructure:"batch_enabled"`
-	SlotHours     string `mapstructure:"slot_hours"`       // 逗号分隔，如 8,11,14,17,20 约每 3 小时一次
-	MaxPushesPerDay int  `mapstructure:"max_pushes_per_day"` // 每日 Server 酱最多条数，默认 5
-	MergeSegments   int  `mapstructure:"merge_segments"`     // 每次合并「最近 N 段」小时摘要，默认 2
+	BatchEnabled    bool   `mapstructure:"batch_enabled"`
+	SlotHours       string `mapstructure:"slot_hours"`         // 逗号分隔，如 8,11,14,17,20 约每 3 小时一次
+	MaxPushesPerDay int    `mapstructure:"max_pushes_per_day"` // 每日 Server 酱最多条数，默认 5
+	MergeSegments   int    `mapstructure:"merge_segments"`     // 每次合并「最近 N 段」小时摘要，默认 2
 	// NotifyOnStartup 开启 batch 时：首次成功发邮件后补一条与邮件纯文（AI 过滤快报）相同的微信；非 batch 时一次 Send 已含微信
 	NotifyOnStartup bool `mapstructure:"notify_on_startup"`
 }
@@ -335,6 +335,7 @@ type AdvancedConfig struct {
 	} `mapstructure:"version_check_url"`
 	Crawler               CrawlerConfig     `mapstructure:"crawler"`
 	RSS                   RSSAdvancedConfig `mapstructure:"rss"`
+	WebFetch              WebFetchConfig    `mapstructure:"web_fetch"`
 	Weight                WeightConfig      `mapstructure:"weight"`
 	MaxAccountsPerChannel int               `mapstructure:"max_accounts_per_channel"`
 	BatchSize             BatchSizeConfig   `mapstructure:"batch_size"`
@@ -353,6 +354,19 @@ type RSSAdvancedConfig struct {
 	ProxyURL        string `mapstructure:"proxy_url"`
 }
 
+type WebFetchConfig struct {
+	Timeout       int    `mapstructure:"timeout"`
+	Retries       int    `mapstructure:"retries"`
+	BackoffMS     int    `mapstructure:"backoff_ms"`
+	MinTextChars  int    `mapstructure:"min_text_chars"`
+	MaxTextRunes  int    `mapstructure:"max_text_runes"`
+	MaxBodyMB     int    `mapstructure:"max_body_mb"`
+	UserAgent     string `mapstructure:"user_agent"`
+	JinaEnabled   bool   `mapstructure:"jina_enabled"`
+	JinaTimeout   int    `mapstructure:"jina_timeout"`
+	JinaBaseURL   string `mapstructure:"jina_base_url"`
+	RespectRobots bool   `mapstructure:"respect_robots"`
+}
 type WeightConfig struct {
 	Rank      float64 `mapstructure:"rank"`
 	Frequency float64 `mapstructure:"frequency"`
@@ -370,6 +384,7 @@ type BatchSizeConfig struct {
 // Config 单例
 var instance *Config
 var v *viper.Viper
+
 // configYAMLDir 当前使用的 config.yaml 所在目录，供 WebRoot 等相对路径解析
 var configYAMLDir string
 
@@ -513,6 +528,17 @@ func setDefaults() {
 	v.SetDefault("daily_export.fetch_content", true)
 	v.SetDefault("daily_export.max_fetch_concurrency", 5)
 
+	v.SetDefault("advanced.web_fetch.timeout", 18)
+	v.SetDefault("advanced.web_fetch.retries", 2)
+	v.SetDefault("advanced.web_fetch.backoff_ms", 1200)
+	v.SetDefault("advanced.web_fetch.min_text_chars", 180)
+	v.SetDefault("advanced.web_fetch.max_text_runes", 12000)
+	v.SetDefault("advanced.web_fetch.max_body_mb", 2)
+	v.SetDefault("advanced.web_fetch.user_agent", "")
+	v.SetDefault("advanced.web_fetch.jina_enabled", true)
+	v.SetDefault("advanced.web_fetch.jina_timeout", 28)
+	v.SetDefault("advanced.web_fetch.jina_base_url", "https://r.jina.ai")
+	v.SetDefault("advanced.web_fetch.respect_robots", false)
 	v.SetDefault("logging.enabled", true)
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.file", "logs/trendradar.log")

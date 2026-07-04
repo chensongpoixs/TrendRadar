@@ -510,14 +510,18 @@ func pushToModelScope(exportDir, year, month, ymd, repo, token, gitUser, gitEmai
 
 	for attempt := 1; attempt <= 3; attempt++ {
 		l.Info(fmt.Sprintf("  [Git 4/4] Push attempt %d/3...", attempt))
-		err := runGitCmd(exec.Command("git", "-C", repoDir, "push", "origin", "HEAD"), 120*time.Second)
+		err := runGitCmdWithOutput(exec.Command("git", "-C", repoDir, "push", "origin", "HEAD"), 120*time.Second)
 		if err == nil {
 			l.Info(fmt.Sprintf("  [Git 4/4] Push succeeded! repo=%s, ymd=%s", repo, ymd))
 			return nil
 		}
+		l.Error(fmt.Sprintf("  [Git 4/4] Push attempt %d failed", attempt), zap.Error(err))
 		if attempt < 3 {
 			time.Sleep(5 * time.Second)
-			_ = runGitCmd(exec.Command("git", "-C", repoDir, "pull", "--rebase", "origin", "HEAD"), 60*time.Second)
+			rebErr := runGitCmdWithOutput(exec.Command("git", "-C", repoDir, "pull", "--rebase", "origin", "HEAD"), 60*time.Second)
+			if rebErr != nil {
+				l.Error("  [Git 4/4] Pull --rebase failed", zap.Error(rebErr))
+			}
 		}
 	}
 	return fmt.Errorf("git push failed after 3 attempts")
@@ -532,6 +536,32 @@ func runGitCmd(cmd *exec.Cmd, timeout time.Duration) error {
 	select {
 	case err := <-done:
 		return err
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("git command timeout after %v: %s", timeout, strings.Join(cmd.Args, " "))
+	}
+}
+
+// runGitCmdWithOutput 执行 git 命令并捕获 stderr，错误信息包含 git 的原始错误输出。
+func runGitCmdWithOutput(cmd *exec.Cmd, timeout time.Duration) error {
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", strings.Join(cmd.Args, " "), err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			stderrStr := strings.TrimSpace(stderr.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%s: %w\nstderr: %s", strings.Join(cmd.Args, " "), err, stderrStr)
+			}
+			return fmt.Errorf("%s: %w", strings.Join(cmd.Args, " "), err)
+		}
+		return nil
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("git command timeout after %v: %s", timeout, strings.Join(cmd.Args, " "))

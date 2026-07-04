@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/trendradar/backend-go/internal/webfetch"
+
 	"github.com/trendradar/backend-go/pkg/config"
 )
 
@@ -87,7 +89,7 @@ func SummarizeNewsArticle(ctx context.Context, title, rawURL, sourceName string)
 	}
 	msgs := []ChatMessage{
 		{
-			Role: "system",
+			Role:    "system",
 			Content: "你是资深科技产业分析师，兼具媒体编辑的简洁表达与投研的严谨逻辑。只输出汇报正文，不要使用 markdown 代码围栏。若无法确定事实，须写「待核实」而非臆测。优先关注产业竞争格局、技术路线与商业模式维度的信息增量和潜在影响。",
 		},
 		{Role: "user", Content: user.String()},
@@ -124,62 +126,7 @@ func applyArticleAnalyzeHTTPDefaults(c *AIClient) {
 // 对于反爬严格的站点（知乎、百度等）会自动切换 UA 重试一次。
 // 直抓失败时，通过 Jina AI Reader（服务端渲染 JS 页面）降级抓取。
 func FetchArticlePlainText(ctx context.Context, rawURL string) (string, error) {
-	// 模拟真实 Chrome 浏览器的完整请求头
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Dnt", "1")
-
-	// 自动跟随重定向且携带 cookie
-	cli := &http.Client{
-		Timeout: articleFetchTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
-	}
-
-	text, err := doFetchPlainText(cli, req)
-	if err != nil {
-		// 403/429/503 等反爬状态码：换一套 UA 重试一次
-		if strings.Contains(err.Error(), "http status 403") ||
-			strings.Contains(err.Error(), "http status 429") ||
-			strings.Contains(err.Error(), "http status 503") {
-			req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-			req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
-			text, err = doFetchPlainText(cli, req)
-		}
-	}
-
-	// 直抓成功且内容不像"需开启 JS"的空壳页面，直接返回
-	if err == nil && text != "" && !isJSRequiredPage(text) {
-		return text, nil
-	}
-
-	// 降级：通过 Jina AI Reader 抓取（服务端渲染 JS 页面）
-	if jinaText, jinaErr := fetchViaJinaReader(ctx, rawURL); jinaErr == nil && jinaText != "" {
-		return jinaText, nil
-	}
-
-	if err != nil {
-		return "", err
-	}
-	return text, nil
+	return webfetch.FetchPlainText(ctx, rawURL)
 }
 
 // isJSRequiredPage 检测响应内容是否为"请启用 JavaScript"类空壳页面或无实质内容的 JSON 载荷
@@ -268,33 +215,7 @@ func fetchViaJinaReader(ctx context.Context, rawURL string) (string, error) {
 
 // FetchArticleWithFallback 先尝试主 URL，失败则用 mobileURL 降级再试，适用于微博/抖音等反爬严格的平台。
 func FetchArticleWithFallback(ctx context.Context, url, mobileURL string) (string, error) {
-	url = strings.TrimSpace(url)
-	mobileURL = strings.TrimSpace(mobileURL)
-	if url == "" && mobileURL == "" {
-		return "", fmt.Errorf("both urls empty")
-	}
-	if url == "" {
-		url = mobileURL
-		mobileURL = ""
-	}
-
-	text, err := FetchArticlePlainText(ctx, url)
-	if err == nil && text != "" {
-		return text, nil
-	}
-
-	// 若主 URL 失败且有 mobileURL（且不同），用 mobileURL 再试
-	if mobileURL != "" && mobileURL != url {
-		text2, err2 := FetchArticlePlainText(ctx, mobileURL)
-		if err2 == nil && text2 != "" {
-			return text2, nil
-		}
-	}
-
-	if err != nil {
-		return "", err
-	}
-	return text, nil
+	return webfetch.FetchWithFallback(ctx, url, mobileURL)
 }
 
 func doFetchPlainText(cli *http.Client, req *http.Request) (string, error) {
