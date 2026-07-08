@@ -3,6 +3,7 @@ module github.com/trendradar/backend-go
 go 1.25.0
 
 require (
+	github.com/PuerkitoBio/goquery v1.10.2
 	github.com/gin-contrib/zap v1.1.7
 	github.com/gin-gonic/gin v1.12.0
 	github.com/joho/godotenv v1.5.1
@@ -18,7 +19,6 @@ require (
 )
 
 require (
-	github.com/PuerkitoBio/goquery v1.10.2 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect

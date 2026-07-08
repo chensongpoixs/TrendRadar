@@ -134,14 +134,15 @@ type FilterConfig struct {
 
 // AIConfig AI 配置
 type AIConfig struct {
-	Model          string   `mapstructure:"model"`
-	APIKey         string   `mapstructure:"api_key"`
-	APIBase        string   `mapstructure:"api_base"`
-	Timeout        int      `mapstructure:"timeout"`
-	Temperature    float64  `mapstructure:"temperature"`
-	MaxTokens      int      `mapstructure:"max_tokens"`
-	NumRetries     int      `mapstructure:"num_retries"`
-	FallbackModels []string `mapstructure:"fallback_models"`
+	Model           string   `mapstructure:"model"`
+	APIKey          string   `mapstructure:"api_key"`
+	APIBase         string   `mapstructure:"api_base"`
+	Timeout         int      `mapstructure:"timeout"`
+	Temperature     float64  `mapstructure:"temperature"`
+	MaxTokens       int      `mapstructure:"max_tokens"`
+	NumRetries      int      `mapstructure:"num_retries"`
+	FallbackModels  []string `mapstructure:"fallback_models"`
+	MaxContextChars int      `mapstructure:"max_context_chars"` // 最大上下文字符数 (rune)，0=不限制 (默认 70000)
 }
 
 // AIModelOverride 可选的模型/端点覆盖，嵌入各 AI 子配置段实现不同任务使用不同 LLM
@@ -498,6 +499,7 @@ func setDefaults() {
 	v.SetDefault("ai.timeout", 120)
 	v.SetDefault("ai.temperature", 1.0)
 	v.SetDefault("ai.max_tokens", 5000)
+	v.SetDefault("ai.max_context_chars", 70000)
 
 	v.SetDefault("notification.enabled", true)
 	v.SetDefault("notification.channels.serverchan.batch_enabled", false)

@@ -79,6 +79,8 @@ func migrateDatabase() error {
 		&model.EmailSentFingerprint{},
 		&model.HotlistSnapshot{},
 		&model.DayIndustryReport{},
+		&model.ChatSession{},
+		&model.ChatMessageRecord{},
 	)
 }
 

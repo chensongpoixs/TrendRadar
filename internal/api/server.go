@@ -91,6 +91,8 @@ func (s *Server) registerRoutes() {
 
 		// 大模型对话（后端转发，key 不暴露给前端）
 		v1.POST("/ai/chat", PostAIChat)
+		// 大模型流式对话 (SSE)，逐 token 实时推送
+		v1.POST("/ai/chat/stream", PostAIChatStream)
 
 		// 话题统计
 		v1.GET("/topics/trending", GetTrendingTopics)
@@ -123,6 +125,17 @@ func (s *Server) registerRoutes() {
 			storage.POST("/sync", SyncFromRemote)
 			storage.GET("/status", GetStorageStatus)
 			storage.GET("/dates", ListAvailableDates)
+		}
+
+		// 聊天历史
+		chatSessions := v1.Group("/chat/sessions")
+		{
+			chatSessions.GET("", ListChatSessions)
+			chatSessions.POST("", CreateChatSession)
+			chatSessions.GET("/:id", GetChatSession)
+			chatSessions.PUT("/:id", UpdateChatSession)
+			chatSessions.POST("/:id/messages", SaveChatMessage)
+			chatSessions.DELETE("/:id", DeleteChatSession)
 		}
 
 		// 每日新闻导出（手动触发），POST body: {"date": "2026-04-28"}，留空为当天
