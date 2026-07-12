@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/trendradar/backend-go/internal/storage"
 	"github.com/trendradar/backend-go/pkg/config"
 	"github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
@@ -16,21 +17,21 @@ import (
 
 // PlatformCrawler 平台热榜爬虫
 type PlatformCrawler struct {
-	client        *http.Client
+	client          *http.Client
 	requestInterval time.Duration
-	useProxy      bool
-	proxyURL      string
+	useProxy        bool
+	proxyURL        string
 }
 
 // NewsNowAPIResponse NewsNow API 响应结构
 type NewsNowAPIResponse struct {
-	Status  string `json:"status"`
-	Items   []NewsNowItem `json:"items"`
+	Status string        `json:"status"`
+	Items  []NewsNowItem `json:"items"`
 }
 
 type NewsNowItem struct {
-	Title    string `json:"title"`
-	URL      string `json:"url"`
+	Title     string `json:"title"`
+	URL       string `json:"url"`
 	MobileURL string `json:"mobileUrl"`
 }
 
@@ -43,8 +44,8 @@ func NewPlatformCrawler() *PlatformCrawler {
 			Timeout: 30 * time.Second,
 		},
 		requestInterval: time.Duration(cfg.Advanced.Crawler.RequestInterval) * time.Millisecond,
-		useProxy: cfg.Advanced.Crawler.UseProxy,
-		proxyURL: cfg.Advanced.Crawler.DefaultProxy,
+		useProxy:        cfg.Advanced.Crawler.UseProxy,
+		proxyURL:        cfg.Advanced.Crawler.DefaultProxy,
 	}
 }
 
@@ -134,43 +135,74 @@ func (c *PlatformCrawler) fetchWithRetry(url, platformID, platformName string) (
 	return items, nil
 }
 
-// CrawlAll 抓取所有平台数据
+// CrawlAll 抓取所有启用平台数据，并记录每个源的最近一次健康状态。
 func (c *PlatformCrawler) CrawlAll() (map[string][]model.NewsItem, map[string]string, []string, error) {
 	cfg := config.Get()
 
 	results := make(map[string][]model.NewsItem)
 	idToName := make(map[string]string)
 	var failedIDs []string
+	var healthRows []storage.SourceHealthInput
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	// 创建信号量控制并发
 	sem := make(chan struct{}, 5) // 最多 5 个并发
 
 	for _, source := range cfg.Platforms.Sources {
+		if !source.Enabled {
+			continue
+		}
 
 		wg.Add(1)
 		idToName[source.ID] = source.Name
 
 		go func(platformID, platformName string) {
 			defer wg.Done()
-			sem <- struct{}{} // 获取信号量
-			defer func() { <-sem }() // 释放信号量
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
+			startedAt := time.Now()
 			items, err := c.FetchData(platformID, platformName)
+			finishedAt := time.Now()
+			status := storage.SourceStatusSuccess
 			if err != nil {
 				mu.Lock()
 				failedIDs = append(failedIDs, platformID)
+				healthRows = append(healthRows, storage.SourceHealthInput{
+					SourceType:   storage.SourceTypePlatform,
+					SourceID:     platformID,
+					SourceName:   platformName,
+					Enabled:      true,
+					Status:       storage.SourceStatusFailed,
+					ItemCount:    0,
+					LatencyMS:    finishedAt.Sub(startedAt).Milliseconds(),
+					ErrorMessage: err.Error(),
+					StartedAt:    startedAt,
+					FinishedAt:   finishedAt,
+				})
 				mu.Unlock()
 				logger.WithComponent("crawler").Error("crawl platform failed", zap.String("platform_id", platformID), zap.Error(err))
 				return
 			}
+			if len(items) == 0 {
+				status = storage.SourceStatusEmpty
+			}
 
 			mu.Lock()
 			results[platformID] = items
+			healthRows = append(healthRows, storage.SourceHealthInput{
+				SourceType: storage.SourceTypePlatform,
+				SourceID:   platformID,
+				SourceName: platformName,
+				Enabled:    true,
+				Status:     status,
+				ItemCount:  len(items),
+				LatencyMS:  finishedAt.Sub(startedAt).Milliseconds(),
+				StartedAt:  startedAt,
+				FinishedAt: finishedAt,
+			})
 			mu.Unlock()
 
-			// 请求间隔
 			if c.requestInterval > 0 {
 				time.Sleep(c.requestInterval)
 			}
@@ -178,6 +210,9 @@ func (c *PlatformCrawler) CrawlAll() (map[string][]model.NewsItem, map[string]st
 	}
 
 	wg.Wait()
+	if err := storage.NewDiagnosticsStorage().RecordSourceRuns(healthRows); err != nil {
+		logger.WithComponent("crawler").Warn("record platform source health failed", zap.Error(err))
+	}
 
 	return results, idToName, failedIDs, nil
 }

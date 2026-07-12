@@ -81,6 +81,7 @@ func migrateDatabase() error {
 		&model.DayIndustryReport{},
 		&model.ChatSession{},
 		&model.ChatMessageRecord{},
+		&model.SourceHealth{},
 	)
 }
 

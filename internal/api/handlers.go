@@ -20,6 +20,7 @@ import (
 )
 
 var dateYMD = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+var processStartedAt = time.Now()
 
 func parseYMD(s string) (time.Time, bool) {
 	if !dateYMD.MatchString(s) {
@@ -1385,6 +1386,14 @@ func abs(x float64) float64 {
 // GetSystemStatus 获取系统状态
 func GetSystemStatus(c *gin.Context) {
 	cfg := config.Get()
+	diagStorage := storage.NewDiagnosticsStorage()
+	sourceHealth, err := diagStorage.ListSourceHealth("")
+	if err != nil {
+		applog.WithComponent("api").Warn("read source health failed", zap.Error(err))
+		sourceHealth = []model.SourceHealth{}
+	}
+	sourceSummary := storage.BuildSourceHealthSummary(sourceHealth)
+	configAudit := config.Audit(cfg)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -1392,12 +1401,17 @@ func GetSystemStatus(c *gin.Context) {
 			"version":    cfg.App.Version,
 			"environment": cfg.App.Environment,
 			"timezone":   cfg.App.Timezone,
-			"uptime":     time.Since(time.Now()).String(),
+			"uptime":     time.Since(processStartedAt).Round(time.Second).String(),
+			"started_at": processStartedAt.Format(time.RFC3339),
 			"database":   "connected",
+			"config_audit": configAudit,
+			"source_health": gin.H{
+				"summary": sourceSummary,
+				"sources": sourceHealth,
+			},
 		},
 	})
 }
-
 // GetCurrentConfig 获取当前配置
 func GetCurrentConfig(c *gin.Context) {
 	section := c.DefaultQuery("section", "all")

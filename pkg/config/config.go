@@ -134,15 +134,19 @@ type FilterConfig struct {
 
 // AIConfig AI 配置
 type AIConfig struct {
-	Model           string   `mapstructure:"model"`
-	APIKey          string   `mapstructure:"api_key"`
-	APIBase         string   `mapstructure:"api_base"`
-	Timeout         int      `mapstructure:"timeout"`
-	Temperature     float64  `mapstructure:"temperature"`
-	MaxTokens       int      `mapstructure:"max_tokens"`
-	NumRetries      int      `mapstructure:"num_retries"`
-	FallbackModels  []string `mapstructure:"fallback_models"`
-	MaxContextChars int      `mapstructure:"max_context_chars"` // 最大上下文字符数 (rune)，0=不限制 (默认 70000)
+	Model                    string   `mapstructure:"model"`
+	APIKey                   string   `mapstructure:"api_key"`
+	APIBase                  string   `mapstructure:"api_base"`
+	Timeout                  int      `mapstructure:"timeout"`
+	Temperature              float64  `mapstructure:"temperature"`
+	MaxTokens                int      `mapstructure:"max_tokens"`
+	NumRetries               int      `mapstructure:"num_retries"`
+	FallbackModels           []string `mapstructure:"fallback_models"`
+	MaxContextChars          int      `mapstructure:"max_context_chars"`            // 最大上下文字符数 (rune)，0=不限制 (默认 70000)
+	ContextCompressThreshold float64  `mapstructure:"context_compress_threshold"`   // 触发压缩的阈值比例 (0.1~1.0)，默认 0.7
+	ContextKeepRounds        int      `mapstructure:"context_keep_rounds"`          // 保留原文的最近对话轮数，默认 6
+	ContextSummaryMaxChars   int      `mapstructure:"context_summary_max_chars"`    // 单条对话摘要最大字符数，默认 2000
+	ContextSummaryModel      string   `mapstructure:"context_summary_model"`        // 摘要专用模型（空=使用默认模型）
 }
 
 // AIModelOverride 可选的模型/端点覆盖，嵌入各 AI 子配置段实现不同任务使用不同 LLM
@@ -500,6 +504,10 @@ func setDefaults() {
 	v.SetDefault("ai.temperature", 1.0)
 	v.SetDefault("ai.max_tokens", 5000)
 	v.SetDefault("ai.max_context_chars", 70000)
+	v.SetDefault("ai.context_compress_threshold", 0.7)
+	v.SetDefault("ai.context_keep_rounds", 6)
+	v.SetDefault("ai.context_summary_max_chars", 2000)
+	v.SetDefault("ai.context_summary_model", "")
 
 	v.SetDefault("notification.enabled", true)
 	v.SetDefault("notification.channels.serverchan.batch_enabled", false)

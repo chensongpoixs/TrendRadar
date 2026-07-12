@@ -87,7 +87,24 @@ func RunDailyExport(date string) error {
 		reportContent = report.Content
 		l.Info(fmt.Sprintf("[Step 3/5] Industry report loaded, length=%d chars", len(reportContent)))
 	} else {
-		l.Info("[Step 3/5] No industry report for this date, skipped")
+		l.Info("[Step 3/5] No cached industry report for this date, attempting auto-generation...")
+		// 尝试用当天快照标题构建 digest，自动生成行业研报
+		digest, err := ns.BuildSnapshotDayDigest(date, []string{}, 0)
+		if err != nil {
+			l.Warn("[Step 3/5] Failed to build digest for report generation", zap.Error(err))
+		} else if digest != nil && strings.TrimSpace(digest.Digest) != "" {
+			ctx := context.Background()
+			reportContent, genErr := ai.GenerateDayIndustryReport(ctx, date, digest.Digest, "Asia/Shanghai")
+			if genErr != nil {
+				l.Warn("[Step 3/5] AI report generation failed", zap.Error(genErr))
+			} else {
+				l.Info("[Step 3/5] Auto-generated industry report, length=" + fmt.Sprintf("%d", len(reportContent)) + " chars")
+				// 缓存研报，供后续 API 查询使用
+				_ = ns.SaveDayIndustryReport(date, reportContent, "")
+			}
+		} else {
+			l.Info("[Step 3/5] No digest available for report generation")
+		}
 	}
 
 	// 4. 生成目录结构

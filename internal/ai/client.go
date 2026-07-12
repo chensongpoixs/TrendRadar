@@ -77,6 +77,9 @@ type StreamChunk struct {
 	Usage           *UsageInfo `json:"-"`         // 可选：token 用量（通常在最后一个 SSE 事件中附带）
 	MaxContextChars int    `json:"-"`             // 最大上下文字符数（用于前端显示上下文窗口占用）
 	MaxTokens       int    `json:"-"`             // 最大输出 token 数（用于前端显示输出进度）
+	// 时间统计（用于前端显示）
+	PromptTimeMs     float64 `json:"-"` // prompt 处理耗时（ms）
+	GenerationTimeMs float64 `json:"-"` // token 生成耗时（ms）
 }
 
 // streamUsage 解析 OpenAI 流式响应中的 usage 结构
@@ -104,8 +107,10 @@ type streamDelta struct {
 
 // ChatCompletionStream 发起流式聊天补全请求，通过 onChunk 回调逐块返回内容。
 // ctx 支持客户端断开时取消；maxOutputTokens ≤0 使用全局配置。
+// 上下文压缩在阈值触发（非超限后才压缩），避免超出模型限制。
+// 返回完整 token 用量与时间统计。
 func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMessage, maxOutputTokens int, onChunk func(StreamChunk) error) error {
-	// 上下文压缩：如果超过最大字符限制，自动压缩 messages
+	// 上下文压缩：如果超过阈值，自动摘要压缩早期对话
 	if c.maxContextChars > 0 {
 		messages = c.compressMessages(messages)
 	}
@@ -145,6 +150,7 @@ func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMess
 		zap.String("request_body", string(body)),
 	)
 
+	start := time.Now()
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("stream request failed: %w", err)
@@ -163,6 +169,10 @@ func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMess
 	scanner := bufio.NewScanner(resp.Body)
 	// 增大 buffer 以容纳较大的 SSE 行
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var finalUsage *UsageInfo
+	var promptTimeMs, generationTimeMs float64
+	firstTokenTime := time.Duration(0) // 首 token 时间（TTFT）
 
 	for scanner.Scan() {
 		// 检查 context 是否已取消（客户端断开）
@@ -192,6 +202,10 @@ func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMess
 		var delta streamDelta
 		if err := json.Unmarshal([]byte(data), &delta); err == nil && len(delta.Choices) > 0 {
 			d := delta.Choices[0].Delta
+			// 记录首 token 时间（TTFT）
+			if firstTokenTime == 0 && (d.Content != "" || d.ReasoningContent != "") {
+				firstTokenTime = time.Since(start)
+			}
 			if d.ReasoningContent != "" {
 				if err := onChunk(StreamChunk{Reasoning: d.ReasoningContent}); err != nil {
 					return err
@@ -208,13 +222,18 @@ func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMess
 		// 该事件可能同时包含 choices 和 usage，因此单独解析
 		var usageEvt streamUsageEvent
 		if err := json.Unmarshal([]byte(data), &usageEvt); err == nil && usageEvt.Usage != nil {
+			promptTimeMs = float64(firstTokenTime.Microseconds()) / 1000.0 // ms
+			generationTimeMs = float64(time.Since(start).Microseconds()-firstTokenTime.Microseconds()) / 1000.0
+			finalUsage = &UsageInfo{
+				PromptTokens:     usageEvt.Usage.PromptTokens,
+				CompletionTokens: usageEvt.Usage.CompletionTokens,
+				TotalTokens:      usageEvt.Usage.TotalTokens,
+			}
 			if err := onChunk(StreamChunk{
-				Done: true,
-				Usage: &UsageInfo{
-					PromptTokens:     usageEvt.Usage.PromptTokens,
-					CompletionTokens: usageEvt.Usage.CompletionTokens,
-					TotalTokens:      usageEvt.Usage.TotalTokens,
-				},
+				Done:             true,
+				Usage:            finalUsage,
+				PromptTimeMs:     promptTimeMs,
+				GenerationTimeMs: generationTimeMs,
 			}); err != nil {
 				return err
 			}
@@ -307,7 +326,7 @@ func (c *AIClient) WithHTTPTimeout(d time.Duration) *AIClient {
 }
 
 func (c *AIClient) chatWithMaxOutput(ctx context.Context, messages []ChatMessage, maxOutputTokens int) (string, UsageInfo, error) {
-	// 上下文压缩：如果超过最大字符限制，自动压缩 messages
+	// 上下文压缩：如果超过阈值，自动摘要压缩早期对话
 	if c.maxContextChars > 0 {
 		messages = c.compressMessages(messages)
 	}
@@ -466,23 +485,69 @@ func (c *AIClient) countContextChars(messages []ChatMessage) int {
 	return total
 }
 
-// compressMessages 当上下文超过限制时，压缩 messages：
+// contextCompressThreshold 返回触发压缩的字符阈值
+func (c *AIClient) contextCompressThreshold() int {
+	if c.maxContextChars <= 0 {
+		return 0 // 不限制，不触发
+	}
+	threshold := config.Get().AI.ContextCompressThreshold
+	if threshold <= 0 || threshold > 1 {
+		threshold = 0.7
+	}
+	return int(float64(c.maxContextChars) * threshold)
+}
+
+// contextKeepRounds 返回保留原文的最近对话轮数
+func (c *AIClient) contextKeepRounds() int {
+	rounds := config.Get().AI.ContextKeepRounds
+	if rounds <= 0 {
+		rounds = 6
+	}
+	return rounds
+}
+
+// contextSummaryMaxChars 返回摘要最大字符数
+func (c *AIClient) contextSummaryMaxChars() int {
+	maxChars := config.Get().AI.ContextSummaryMaxChars
+	if maxChars <= 0 {
+		maxChars = 2000
+	}
+	return maxChars
+}
+
+// getSummaryModel 返回摘要使用的模型（优先专用模型，否则使用默认模型）
+func (c *AIClient) getSummaryModel() string {
+	summaryModel := config.Get().AI.ContextSummaryModel
+	if summaryModel != "" {
+		return summaryModel
+	}
+	return c.model
+}
+
+// compressMessages 当上下文超过阈值时，压缩 messages：
+//
+// 策略（混合方案）：
 // 1. 始终保留 system message
-// 2. 保留最近的对话历史
-// 3. 截断最早的 user/assistant 消息
+// 2. 保留最近的 K 轮对话原文（user+assistant 配对）
+// 3. 更早的对话消息，尝试用 AI 摘要压缩
+// 4. 摘要失败时降级为截断策略
+// 5. 如果仍超限，截断最近对话
 func (c *AIClient) compressMessages(messages []ChatMessage) []ChatMessage {
 	totalChars := c.countContextChars(messages)
-	if totalChars <= c.maxContextChars {
-		return messages // 不需要压缩
+	threshold := c.contextCompressThreshold()
+
+	// 未达到压缩阈值，不需要压缩
+	if threshold <= 0 || totalChars <= threshold {
+		return messages
 	}
 
-	logger.WithComponent("ai").Warn("context exceeds max length, compressing",
-		zap.Int("max_context_chars", c.maxContextChars),
+	logger.WithComponent("ai").Warn("context exceeds compression threshold, compressing",
+		zap.Int("threshold", threshold),
 		zap.Int("current_chars", totalChars),
+		zap.Int("max_context_chars", c.maxContextChars),
 		zap.Int("message_count", len(messages)))
 
-	// 策略：保留 system + 最近消息，截断最早的部分
-	// 1. 找到 system message 索引
+	// 找到 system message 索引
 	systemIdx := -1
 	for i, m := range messages {
 		if m.Role == "system" {
@@ -491,42 +556,138 @@ func (c *AIClient) compressMessages(messages []ChatMessage) []ChatMessage {
 		}
 	}
 
-	// 2. 计算剩余可用字符 (预留 10% 缓冲)
-	availableChars := int(float64(c.maxContextChars) * 0.9)
-	usedChars := 0
-
-	// 3. 保留 system message (如果存在)
-	var result []ChatMessage
-	if systemIdx >= 0 {
-		result = append(result, messages[systemIdx])
-		usedChars += utf8.RuneCountInString(messages[systemIdx].Role) + utf8.RuneCountInString(messages[systemIdx].Content)
+	// 提取非 system 消息及其索引
+	var nonSystemMsgs []struct {
+		index int
+		msg   ChatMessage
+	}
+	for i, m := range messages {
+		if i != systemIdx {
+			nonSystemMsgs = append(nonSystemMsgs, struct {
+				index int
+				msg   ChatMessage
+			}{index: i, msg: m})
+		}
 	}
 
-	// 4. 从后往前添加消息，直到达到限制
+	// 计算需要保留的最近轮数（每轮 2 条消息：user + assistant）
+	keepPairs := c.contextKeepRounds()
+	keepCount := keepPairs * 2
+	if keepCount > len(nonSystemMsgs) {
+		keepCount = len(nonSystemMsgs)
+	}
+
+	// 分离：早期消息（需要压缩）和最近消息（保留原文）
+	var earlyMsgs []ChatMessage
+	var recentMsgs []ChatMessage
+	if len(nonSystemMsgs) > keepCount {
+		earlyMsgs = make([]ChatMessage, 0, len(nonSystemMsgs)-keepCount)
+		for _, m := range nonSystemMsgs[:len(nonSystemMsgs)-keepCount] {
+			earlyMsgs = append(earlyMsgs, m.msg)
+		}
+		for _, m := range nonSystemMsgs[len(nonSystemMsgs)-keepCount:] {
+			recentMsgs = append(recentMsgs, m.msg)
+		}
+	} else {
+		// 所有消息都可以保留（但可能仍需整体截断）
+		for _, m := range nonSystemMsgs {
+			recentMsgs = append(recentMsgs, m.msg)
+		}
+	}
+
+	var result []ChatMessage
+
+	// 添加 system message
+	if systemIdx >= 0 {
+		result = append(result, messages[systemIdx])
+	}
+
+	// 尝试对早期消息进行摘要压缩
+	if len(earlyMsgs) > 0 {
+		summary := c.summarizeMessages(earlyMsgs)
+		if summary != "" {
+			result = append(result, ChatMessage{
+				Role:    "system",
+				Content: "[对话历史摘要]\n" + summary,
+			})
+			logger.WithComponent("ai").Info("message summary generated",
+				zap.Int("early_messages", len(earlyMsgs)),
+				zap.Int("summary_chars", utf8.RuneCountInString(summary)))
+		} else {
+			// 摘要失败，降级为截断（保留最早的几条作为上下文提示）
+			logger.WithComponent("ai").Warn("message summary failed, falling back to truncation")
+			result = append(result, ChatMessage{
+				Role:    "system",
+				Content: "[早期对话已被截断，仅保留最近对话]",
+			})
+		}
+	}
+
+	// 添加最近消息
+	result = append(result, recentMsgs...)
+
+	compressedChars := c.countContextChars(result)
+	logger.WithComponent("ai").Info("context compression done",
+		zap.Int("original_count", len(messages)),
+		zap.Int("compressed_count", len(result)),
+		zap.Int("original_chars", totalChars),
+		zap.Int("compressed_chars", compressedChars),
+		zap.Int("early_messages_summarized", len(earlyMsgs)),
+		zap.Int("recent_messages_kept", len(recentMsgs)))
+
+	// 最终检查：如果仍然超限，截断最近消息
+	if c.maxContextChars > 0 && compressedChars > c.maxContextChars {
+		logger.WithComponent("ai").Warn("still exceeds max after compression, truncating recent messages",
+			zap.Int("compressed_chars", compressedChars),
+			zap.Int("max_context_chars", c.maxContextChars))
+		result = c.truncateRecentMessages(result)
+	}
+
+	return result
+}
+
+// truncateRecentMessages 截断最近消息以适应限制
+func (c *AIClient) truncateRecentMessages(messages []ChatMessage) []ChatMessage {
+	if c.maxContextChars <= 0 {
+		return messages
+	}
+
+	// 找到 system message 索引
+	systemIdx := -1
+	for i, m := range messages {
+		if m.Role == "system" {
+			systemIdx = i
+			break
+		}
+	}
+
+	var result []ChatMessage
+	usedChars := 0
+
+	// 保留 system message
+	if systemIdx >= 0 {
+		usedChars += utf8.RuneCountInString(messages[systemIdx].Role) + utf8.RuneCountInString(messages[systemIdx].Content)
+		result = append(result, messages[systemIdx])
+	}
+
+	// 从后往前保留消息
 	for i := len(messages) - 1; i >= 0; i-- {
 		if i == systemIdx {
-			continue // 跳过 system message (已添加)
+			continue
 		}
 		charCount := utf8.RuneCountInString(messages[i].Role) + utf8.RuneCountInString(messages[i].Content)
-		if usedChars+charCount > availableChars {
-			// 截断当前消息内容以适应剩余空间
-			remaining := availableChars - usedChars
-			if remaining > 0 {
+		if c.maxContextChars > 0 && usedChars+charCount > c.maxContextChars {
+			// 截断以适应
+			remaining := c.maxContextChars - usedChars
+			if remaining > 20 { // 至少留一些空间
 				truncated := c.truncateMessage(messages[i], remaining)
 				result = append([]ChatMessage{truncated}, result...)
-				usedChars += remaining
 			}
 			break
 		}
 		result = append([]ChatMessage{messages[i]}, result...)
 		usedChars += charCount
 	}
-
-	logger.WithComponent("ai").Info("context compression done",
-		zap.Int("original_count", len(messages)),
-		zap.Int("compressed_count", len(result)),
-		zap.Int("original_chars", totalChars),
-		zap.Int("compressed_chars", c.countContextChars(result)))
 
 	return result
 }
@@ -536,12 +697,104 @@ func (c *AIClient) truncateMessage(msg ChatMessage, remaining int) ChatMessage {
 	if remaining <= 0 {
 		return msg
 	}
+	runeCount := utf8.RuneCountInString(msg.Content)
+	if runeCount <= remaining {
+		return msg
+	}
 	// 保留 role，截断 content
-	truncated := msg.Content[:remaining-2] + "...\n[上下文已截断]"
+	truncated := string([]rune(msg.Content)[:max(0, remaining-2)]) + "...\n[已截断]"
 	return ChatMessage{
 		Role:    msg.Role,
 		Content: truncated,
 	}
+}
+
+// summarizeMessages 使用 AI 对早期对话消息生成摘要。
+// 返回格式化的摘要文本，失败或空输入时返回空字符串。
+func (c *AIClient) summarizeMessages(messages []ChatMessage) string {
+	if len(messages) == 0 {
+		return ""
+	}
+
+	// 构建摘要请求的对话内容
+	var contentBuilder strings.Builder
+	for _, m := range messages {
+		roleLabel := map[string]string{
+			"user": "用户", "assistant": "助手", "system": "系统",
+		}[m.Role]
+		if roleLabel == "" {
+			roleLabel = m.Role
+		}
+		contentBuilder.WriteString(fmt.Sprintf("[%s]: %s\n", roleLabel, m.Content))
+	}
+
+	prompt := `你是一个对话摘要助手。请总结以下对话片段，保留：
+1. 每个角色（用户/助手）的核心观点和问题
+2. 关键事实、数据、代码片段
+3. 对话的主题和进展
+
+要求：
+- 简洁明了，去除客套话和重复内容
+- 保留所有技术细节、数字、代码示例
+- 用中文总结（如果对话是中文）
+- 每轮对话用一段话概括
+
+对话片段：
+` + contentBuilder.String()
+
+	// 创建摘要请求
+	summaryMessages := []ChatMessage{
+		{Role: "user", Content: prompt},
+	}
+
+	// 使用专用摘要客户端（可能使用更便宜/更快的模型）
+	summaryClient := c.withSummaryModel()
+
+	// 设置较短的超时和 max_tokens
+	origTimeout := c.timeout
+	origMaxTokens := c.maxTokens
+	c.timeout = 30 * time.Second
+	c.maxTokens = c.contextSummaryMaxChars() / 4 // 摘要不需要太多输出
+
+	// 执行摘要请求
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	reply, _, err := summaryClient.chatWithMaxOutput(ctx, summaryMessages, c.contextSummaryMaxChars()/4)
+	// 恢复原始配置
+	c.timeout = origTimeout
+	c.maxTokens = origMaxTokens
+
+	if err != nil {
+		logger.WithComponent("ai").Warn("context summary failed", zap.Error(err))
+		return ""
+	}
+
+	// 清理摘要：去除可能的标记
+	summary := strings.TrimSpace(reply)
+	// 去除可能的 "以下是摘要：" 等前缀
+	summary = strings.ReplaceAll(summary, "以下是摘要：", "")
+	summary = strings.ReplaceAll(summary, "以下是摘要:", "")
+	summary = strings.ReplaceAll(summary, "摘要如下：", "")
+	summary = strings.ReplaceAll(summary, "摘要如下:", "")
+
+	// 限制摘要长度
+	if utf8.RuneCountInString(summary) > c.contextSummaryMaxChars() {
+		summary = string([]rune(summary)[:c.contextSummaryMaxChars()]) + "..."
+	}
+
+	return summary
+}
+
+// withSummaryModel 返回一个使用摘要专用模型的客户端副本
+func (c *AIClient) withSummaryModel() *AIClient {
+	model := c.getSummaryModel()
+	if model == c.model {
+		return c
+	}
+	c2 := *c
+	c2.model = model
+	return &c2
 }
 
 // getAPIURL 获取 API URL

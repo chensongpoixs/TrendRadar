@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mmcdole/gofeed"
+	"github.com/trendradar/backend-go/internal/storage"
 	"github.com/trendradar/backend-go/pkg/config"
 	"github.com/trendradar/backend-go/pkg/logger"
 	"github.com/trendradar/backend-go/pkg/model"
@@ -17,9 +18,9 @@ import (
 
 // RSSCrawler RSS 爬虫
 type RSSCrawler struct {
-	client         *http.Client
+	client          *http.Client
 	requestInterval time.Duration
-	timeout        time.Duration
+	timeout         time.Duration
 }
 
 // NewRSSCrawler 创建 RSS 爬虫实例
@@ -35,13 +36,14 @@ func NewRSSCrawler() *RSSCrawler {
 	}
 }
 
-// FetchAll 抓取所有 RSS 源
+// FetchAll 抓取所有启用 RSS 源，并记录每个源的最近一次健康状态。
 func (c *RSSCrawler) FetchAll() (map[string][]model.RSSItem, map[string]string, []string, error) {
 	cfg := config.Get().RSS
 
 	results := make(map[string][]model.RSSItem)
 	idToName := make(map[string]string)
 	var failedIDs []string
+	var healthRows []storage.SourceHealthInput
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -55,17 +57,46 @@ func (c *RSSCrawler) FetchAll() (map[string][]model.RSSItem, map[string]string, 
 
 		go func(feedID, feedName, feedURL string, maxItems int) {
 			defer wg.Done()
+			startedAt := time.Now()
 			items, err := c.fetchFeed(feedURL, feedID, feedName, maxItems)
+			finishedAt := time.Now()
+			status := storage.SourceStatusSuccess
 			if err != nil {
 				mu.Lock()
 				failedIDs = append(failedIDs, feedID)
+				healthRows = append(healthRows, storage.SourceHealthInput{
+					SourceType:   storage.SourceTypeRSS,
+					SourceID:     feedID,
+					SourceName:   feedName,
+					Enabled:      true,
+					Status:       storage.SourceStatusFailed,
+					ItemCount:    0,
+					LatencyMS:    finishedAt.Sub(startedAt).Milliseconds(),
+					ErrorMessage: err.Error(),
+					StartedAt:    startedAt,
+					FinishedAt:   finishedAt,
+				})
 				mu.Unlock()
 				logger.WithComponent("crawler").Error("rss feed failed", zap.String("feed_id", feedID), zap.Error(err))
 				return
 			}
+			if len(items) == 0 {
+				status = storage.SourceStatusEmpty
+			}
 
 			mu.Lock()
 			results[feedID] = items
+			healthRows = append(healthRows, storage.SourceHealthInput{
+				SourceType: storage.SourceTypeRSS,
+				SourceID:   feedID,
+				SourceName: feedName,
+				Enabled:    true,
+				Status:     status,
+				ItemCount:  len(items),
+				LatencyMS:  finishedAt.Sub(startedAt).Milliseconds(),
+				StartedAt:  startedAt,
+				FinishedAt: finishedAt,
+			})
 			mu.Unlock()
 
 			if c.requestInterval > 0 {
@@ -75,6 +106,9 @@ func (c *RSSCrawler) FetchAll() (map[string][]model.RSSItem, map[string]string, 
 	}
 
 	wg.Wait()
+	if err := storage.NewDiagnosticsStorage().RecordSourceRuns(healthRows); err != nil {
+		logger.WithComponent("crawler").Warn("record rss source health failed", zap.Error(err))
+	}
 
 	return results, idToName, failedIDs, nil
 }
