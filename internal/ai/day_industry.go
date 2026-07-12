@@ -9,7 +9,7 @@ import (
 	"github.com/trendradar/backend-go/pkg/config"
 )
 
-const dayIndustryMaxOutTokens = 15192
+const dayIndustryMaxOutTokens = 8192
 //
 // type DailyDigestPromptData struct {
 // 	DateLocal    string
