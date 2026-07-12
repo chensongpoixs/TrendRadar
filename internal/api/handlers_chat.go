@@ -227,9 +227,11 @@ func PostAIChatStream(c *gin.Context) {
 		return
 	}
 
-	// 发送初始连接确认事件
+	// 发送初始连接确认事件（附带上下文窗口和 max_tokens 限制）
 	writeSSE(c.Writer, flusher, map[string]interface{}{
-		"type": "connected",
+		"type":            "connected",
+		"max_context":     cfg.AI.MaxContextChars,
+		"max_tokens":      maxTok,
 	})
 
 	ctx := c.Request.Context()

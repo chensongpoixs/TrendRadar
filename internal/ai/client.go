@@ -71,10 +71,12 @@ type StreamChatRequest struct {
 
 // StreamChunk 流式响应的单块数据
 type StreamChunk struct {
-	Content   string `json:"content"`   // 正常回答文本片段
-	Reasoning string `json:"reasoning"` // 推理/思考文本片段 (DeepSeek-R1 等)
-	Done      bool   `json:"done"`      // 是否为结束标记
-	Usage     *UsageInfo `json:"-"` // 可选：token 用量（通常在最后一个 SSE 事件中附带）
+	Content         string `json:"content"`         // 正常回答文本片段
+	Reasoning       string `json:"reasoning"`       // 推理/思考文本片段 (DeepSeek-R1 等)
+	Done            bool   `json:"done"`            // 是否为结束标记
+	Usage           *UsageInfo `json:"-"`         // 可选：token 用量（通常在最后一个 SSE 事件中附带）
+	MaxContextChars int    `json:"-"`             // 最大上下文字符数（用于前端显示上下文窗口占用）
+	MaxTokens       int    `json:"-"`             // 最大输出 token 数（用于前端显示输出进度）
 }
 
 // streamUsage 解析 OpenAI 流式响应中的 usage 结构
