@@ -238,14 +238,23 @@ func PostAIChatStream(c *gin.Context) {
 	// 收集完整回复（分别追踪思考内容和正常回答）
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
+	var finalUsage *ai.UsageInfo
 
 	err := client.ChatCompletionStream(ctx, msgs, maxTok, func(chunk ai.StreamChunk) error {
+		if chunk.Done && chunk.Usage != nil {
+			// 这是 OpenAI 流中附带的 token 用量事件
+			finalUsage = chunk.Usage
+			return nil
+		}
+
+		// 正常结束或内容块
 		if chunk.Done {
 			writeSSE(c.Writer, flusher, map[string]interface{}{
 				"type":      "done",
 				"content":   fullContent.String(),
 				"reasoning": fullReasoning.String(),
 				"model":     cfg.AI.Model,
+				"usage":     finalUsage,
 			})
 			return nil
 		}

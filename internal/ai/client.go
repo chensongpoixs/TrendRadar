@@ -74,6 +74,19 @@ type StreamChunk struct {
 	Content   string `json:"content"`   // 正常回答文本片段
 	Reasoning string `json:"reasoning"` // 推理/思考文本片段 (DeepSeek-R1 等)
 	Done      bool   `json:"done"`      // 是否为结束标记
+	Usage     *UsageInfo `json:"-"` // 可选：token 用量（通常在最后一个 SSE 事件中附带）
+}
+
+// streamUsage 解析 OpenAI 流式响应中的 usage 结构
+type streamUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// streamUsageEvent 带 usage 的 SSE 事件
+type streamUsageEvent struct {
+	Usage *streamUsage `json:"usage"`
 }
 
 // streamDelta 解析 OpenAI 流式响应中的 delta 结构
@@ -173,13 +186,9 @@ func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMess
 			return nil
 		}
 
+		// 尝试解析为 delta 事件（正常流式内容）
 		var delta streamDelta
-		if err := json.Unmarshal([]byte(data), &delta); err != nil {
-			logger.WithComponent("ai").Warn("failed to parse stream delta", zap.Error(err), zap.String("data", data))
-			continue
-		}
-
-		if len(delta.Choices) > 0 {
+		if err := json.Unmarshal([]byte(data), &delta); err == nil && len(delta.Choices) > 0 {
 			d := delta.Choices[0].Delta
 			if d.ReasoningContent != "" {
 				if err := onChunk(StreamChunk{Reasoning: d.ReasoningContent}); err != nil {
@@ -190,6 +199,22 @@ func (c *AIClient) ChatCompletionStream(ctx context.Context, messages []ChatMess
 				if err := onChunk(StreamChunk{Content: d.Content}); err != nil {
 					return err
 				}
+			}
+		}
+
+		// 尝试解析为带 usage 的事件（OpenAI 在流最后附带 token 用量）
+		// 该事件可能同时包含 choices 和 usage，因此单独解析
+		var usageEvt streamUsageEvent
+		if err := json.Unmarshal([]byte(data), &usageEvt); err == nil && usageEvt.Usage != nil {
+			if err := onChunk(StreamChunk{
+				Done: true,
+				Usage: &UsageInfo{
+					PromptTokens:     usageEvt.Usage.PromptTokens,
+					CompletionTokens: usageEvt.Usage.CompletionTokens,
+					TotalTokens:      usageEvt.Usage.TotalTokens,
+				},
+			}); err != nil {
+				return err
 			}
 		}
 	}
