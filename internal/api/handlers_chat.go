@@ -227,11 +227,13 @@ func PostAIChatStream(c *gin.Context) {
 		return
 	}
 
-	// 发送初始连接确认事件（附带上下文窗口和 max_tokens 限制）
+	// 发送初始连接确认事件（附带上下文窗口、max_tokens 和压缩阈值）
 	writeSSE(c.Writer, flusher, map[string]interface{}{
-		"type":            "connected",
-		"max_context":     cfg.AI.MaxContextChars,
-		"max_tokens":      maxTok,
+		"type":                   "connected",
+		"max_context":            cfg.AI.MaxContextChars,
+		"max_tokens":             maxTok,
+		"context_compress_ratio": cfg.AI.ContextCompressThreshold,
+		"context_keep_rounds":    cfg.AI.ContextKeepRounds,
 	})
 
 	ctx := c.Request.Context()
@@ -241,23 +243,45 @@ func PostAIChatStream(c *gin.Context) {
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
 	var finalUsage *ai.UsageInfo
+	var finalTiming struct {
+		PromptTimeMs     float64 `json:"prompt_time_ms"`
+		GenerationTimeMs float64 `json:"generation_time_ms"`
+		TotalTimeMs      float64 `json:"total_time_ms"`
+	}
 
 	err := client.ChatCompletionStream(ctx, msgs, maxTok, func(chunk ai.StreamChunk) error {
 		if chunk.Done && chunk.Usage != nil {
-			// 这是 OpenAI 流中附带的 token 用量事件
+			// 这是 OpenAI 流中附带的 token 用量事件，同时携带时间统计
 			finalUsage = chunk.Usage
+			finalTiming.PromptTimeMs = chunk.PromptTimeMs
+			finalTiming.GenerationTimeMs = chunk.GenerationTimeMs
+			finalTiming.TotalTimeMs = chunk.PromptTimeMs + chunk.GenerationTimeMs
 			return nil
 		}
 
 		// 正常结束或内容块
 		if chunk.Done {
-			writeSSE(c.Writer, flusher, map[string]interface{}{
+			// 兜底：如果没收到 usage 事件，返回一个空 usage 对象，
+			// 让前端知道"已请求过但 API 未返回 token 统计"
+			if finalUsage == nil {
+				finalUsage = &ai.UsageInfo{}
+			}
+			event := map[string]interface{}{
 				"type":      "done",
 				"content":   fullContent.String(),
 				"reasoning": fullReasoning.String(),
 				"model":     cfg.AI.Model,
 				"usage":     finalUsage,
-			})
+				"timing":    finalTiming,
+			}
+			// 如果有压缩统计信息，附加到事件中
+			if chunk.MaxContextChars > 0 || chunk.MaxTokens > 0 {
+				event["compression"] = map[string]interface{}{
+					"max_context": chunk.MaxContextChars,
+					"max_tokens":  chunk.MaxTokens,
+				}
+			}
+			writeSSE(c.Writer, flusher, event)
 			return nil
 		}
 		if chunk.Reasoning != "" {
